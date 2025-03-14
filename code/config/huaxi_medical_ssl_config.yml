@@ -1,0 +1,23 @@
+#opt
+dataset: huaxi
+train_epoch: 100
+warmup_epoch: 0
+lr: 0.0001
+wd: 0.00001
+min_lr: 0
+
+#dset
+B: 1
+n_class: 2
+data_dir: '/mnt/Xsky/zyl/dataset/huaxi_ov/roi_feats_x10_1'
+n_shot: -1
+n_worker: 8
+pin_memory: False
+
+#encoder
+backbone: 'ViT-B/16'
+pretrain: 'medical_ssl'
+
+#aggr
+D_inner: 128
+D_feat: 384
