@@ -40,7 +40,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # Path
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
-CODE_DIR = BASE_DIR / "code"
+CODE_DIR = BASE_DIR / "src"
 DATA_DIR = BASE_DIR / "data"
 FEATURES_DIR = BASE_DIR / "features"
 RESULTS_DIR = BASE_DIR / "results"
