@@ -1,6 +1,6 @@
 #!/bin/bash
 PROJECT_DIR=/home/sungj4/projects/digital-pathology
-cd $PROJECT_DIR/code/train
+cd $PROJECT_DIR/src/train
 # nohup bash $PROJECT_DIR/code/train/train_script.sh > $PROJECT_DIR/logs/log_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 # tail -f $PROJECT_DIR/logs/log_<timestamp>.log # monitor
 # watch -n 1 nvidia-smi

@@ -39,7 +39,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # Paths
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
-CODE_DIR = BASE_DIR / "code"
+CODE_DIR = BASE_DIR / "src"
 DATA_DIR = BASE_DIR / "data"
 FEATURES_DIR = BASE_DIR / "features"
 RESULTS_DIR = BASE_DIR / "results"
@@ -116,7 +116,7 @@ def getDataTCGA_PDAC(args):
     TCGA_Path_Feature = TCGA_path / f"Feature_{args.Backbone}"
     TCGA_Path_Heatmap = TCGA_path / f"Heatmap_{args.Backbone}"
     Filenames_TCGA = [i.split('.pickle')[0] for i in os.listdir(TCGA_Path_Coord) if ".svs" in i]
-    Clinical_TCGA = pd.read_csv(DATA_DIR / 'clinical.tsv', sep="\t")
+    Clinical_TCGA = pd.read_csv(DATA_DIR / 'clinical' / 'clinical.tsv', sep="\t")
     Clinical_TCGA.set_index('case_submitter_id', inplace=True)
     Clinical_TCGA = Clinical_TCGA[['vital_status', 'days_to_death', 'days_to_last_follow_up']]
     Clinical_TCGA = Clinical_TCGA.applymap(lambda x: 0 if x == '\'--' else x)
