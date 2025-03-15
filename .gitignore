@@ -147,6 +147,7 @@ cython_debug/
 .pypirc
 
 # Ignore data and other folders but track .gitkeep
+src/train/train_script.sh
 data/*
 !data/.gitkeep
 features/*
