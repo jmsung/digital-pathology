@@ -566,7 +566,7 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
             'times': ncc_times,
             'events': pd.to_numeric(ncc_events_, errors='coerce')
         }).dropna(subset=['events'])
-        data_test['PredClass'] = data_test['risk'] > data_test['risk'].median()
+        data_test['PredClass'] = data_test['risk'] < data_test['risk'].median()
 
         current_test_cindex = concordance_index(
             data_test['times'], data_test['risk'], data_test['events']
@@ -596,7 +596,7 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
             'times': times_save,
             'events': pd.Series(events_save).map(event_mapping)
         }).dropna(subset=['times', 'risk', 'events'])
-        data_train['PredClass'] = data_train['risk'] > data_train['risk'].median()
+        data_train['PredClass'] = data_train['risk'] < data_train['risk'].median()
 
         val_slide_preds, val_times, val_events = [], [], []
         for idx_ in range(len(VALID_FEATURES)):
@@ -614,7 +614,7 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
             'times': val_times,
             'events': pd.Series(val_events).map(event_mapping)
         }).dropna(subset=['times','risk','events'])
-        data_valid['PredClass'] = data_valid['risk'] > data_valid['risk'].median()
+        data_valid['PredClass'] = data_valid['risk'] < data_valid['risk'].median()
 
         print("data_train shape:", data_train.shape)
         print(data_train.head())
