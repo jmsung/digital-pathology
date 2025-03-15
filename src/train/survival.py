@@ -59,7 +59,7 @@ NUM_EXTERNAL = 160
 # Data Loading Functions (unchanged)
 #############################################
 def getData(args):
-    clinical_file = DATA_DIR / "clinical.txt"
+    clinical_file = DATA_DIR / 'clinical' / "clinical.txt"
     Clinical = pd.read_csv(clinical_file, sep="\t")
     Clinical.set_index('Study_no', inplace=True)
 
@@ -83,7 +83,7 @@ def getData(args):
     return Features, Coords, Barcodes, Time, Event
 
 def getDataTCGA_All(args, cancer_types=['LIHC', 'CHOL', 'LUAD', 'COAD', 'ESCA']):
-    Clinical = pd.read_csv(DATA_DIR / "TCGA_clinical_data.tsv", sep="\t")
+    Clinical = pd.read_csv(DATA_DIR / 'clinical' / "TCGA_clinical_data.tsv", sep="\t")
     Clinical.set_index('case_submitter_id', inplace=True)
     Clinical = Clinical.loc[Clinical['cancer_type'].isin(cancer_types)]
     TCGAALL_path = FEATURES_DIR / "Features_AllTypes"
