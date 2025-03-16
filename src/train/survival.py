@@ -13,6 +13,7 @@ from sklearn.model_selection import train_test_split
 import sys
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 import yaml
@@ -49,11 +50,12 @@ WEIGHTS_DIR = RESULTS_DIR / 'Results_weights'
 FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
 
-BATCH_SIZE_MIN, BATCH_SIZE_MAX = 16, 64
+BATCH_SIZE_MIN, BATCH_SIZE_MAX = 8, 16
 CINDEX_MIN = 0.5         # Minimum acceptable test c-index after epoch=0
 MAX_REINIT_ATTEMPTS = 100       # Max times we re-initialize if threshold not met
 BEST_EPOCH_PACIENCE = 50
 NUM_EXTERNAL = 160
+DROPOUT_RATE = 0.2
 
 #############################################
 # Data Loading Functions (unchanged)
@@ -205,6 +207,19 @@ def sample_external(preloaded_external, sample_size):
     sampled_events = events_all.iloc[indices]
 
     return sampled_features, sampled_time, sampled_events
+
+# Function to perform feature subsampling
+def feature_dropout(features, dropout_rate=0.2):
+    """
+    Subsample and dropout features.
+    - Features are randomly dropped (set to zero) based on dropout_rate.
+    - This is done to avoid overfitting and encourage robustness.
+    """
+    # Generate a mask for 80% of features, keeping the remaining 20% dropped
+    mask = (torch.rand(features.size(1)) > dropout_rate).float().to(features.device)  # Mask for each feature
+    # Apply mask to features (drop features by setting them to zero)
+    features = features * mask
+    return features
 
 
 #############################################
@@ -506,11 +521,15 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                     batch_self_loss += self_loss
                 else:
                     feat_ = torch.from_numpy(featureRandomSelection(TRAIN_FEATURES[cur_idx])).unsqueeze(0).float().to(args.device)
+                    
+                    # Apply feature dropout to features
+                    feat_ = feature_dropout(feat_, dropout_rate=DROPOUT_RATE)  # Drop 20% of features
+                    
                     slide_pred = MODEL(feat_)
                 slide_preds.append(slide_pred)
                 times_.append(TRAIN_TIME.iloc[cur_idx])
                 events_.append(TRAIN_EVENT.iloc[cur_idx])
-
+                
             if not slide_preds:
                 continue
 
@@ -547,6 +566,9 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
             events_save.extend(events_)
 
         print(f"Epoch {Epoch}, Training Loss: {trn_loss:.4f}")
+
+        # Clear GPU memory after each epoch
+        torch.cuda.empty_cache()
 
         # Evaluate on test (NCC)
         MODEL.eval()
