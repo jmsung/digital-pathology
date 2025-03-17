@@ -10,14 +10,13 @@ import numpy as np
 import matplotlib.patches as mpatches
 import matplotlib.lines as mlines
 
-# ----- Directories -----
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 RESULTS_DIR = BASE_DIR / "results"
 FIGURES_DIR = RESULTS_DIR / "Results_figures"  # Contains subfolders like rep21, rep22, etc.
 SUMMARY_DIR = RESULTS_DIR / "Results_summary"    # Used for output
 SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
 
-# ----- Regex pattern for single-loss files -----
+# Regex pattern for single-loss files
 pattern_single = re.compile(
     r"""
     ^
@@ -38,32 +37,7 @@ pattern_single = re.compile(
     re.VERBOSE
 )
 
-# 1) Expanded map from repeat # to label
-REPEAT_DATASET_MAP = {
-    '21': "PDAC Only",
-    '22': "PDAC+CHOL",
-    '23': "PDAC+COAD",
-    '24': "PDAC+LUAD",
-    '25': "PDAC+LIHC",
-    '26': "PDAC+ESCA",  # Adjust label as needed.
-}
-
-# 2) Preferred order for all possible datasets:
-PREFERRED_ORDER = [
-    "PDAC Only",
-    "PDAC+CHOL",
-    "PDAC+COAD",
-    "PDAC+LUAD",
-    "PDAC+ESCA",
-    "PDAC+LIHC",
-]
-
 def extract_file_info(filename):
-    """
-    Parse single-loss filenames.
-    Returns a dict with keys: model, loss, learning_rate, weight, epoch,
-    lr_train, lr_valid, lr_test, c_train, c_valid, c_test, repeat.
-    """
     match = pattern_single.match(filename)
     if match:
         return {
@@ -78,16 +52,12 @@ def extract_file_info(filename):
             "c_train": float(match.group("c_train")),
             "c_valid": float(match.group("c_valid")),
             "c_test": float(match.group("c_test")),
-            "repeat": match.group("repeat")
+            "ext": match.group("ext_datasets"),  # External dataset label
+            "repeat": match.group("repeat"),
         }
     return None
 
 def parse_single_loss_files_from_folder(input_folder):
-    """
-    Parse all single-loss .png files in the given input_folder.
-    Returns a dict keyed by (model, loss, lr, weight, repeat)
-    with values = the best run for that combo (based on highest c_test).
-    """
     results = {}
     for file in input_folder.iterdir():
         if not file.is_file():
@@ -101,15 +71,11 @@ def parse_single_loss_files_from_folder(input_folder):
     return results
 
 def aggregate_best_across_folders(folders):
-    """
-    Parse all single-loss runs from these folders and return a DataFrame of the best run per (model, loss, lr, repeat).
-    Includes c_train and c_valid.
-    """
     records = []
     for folder in folders:
         folder_results = parse_single_loss_files_from_folder(folder)
         for key, info in folder_results.items():
-            record = {
+            records.append({
                 'model': info['model'],
                 'loss': info['loss'],
                 'lr': info['learning_rate'],
@@ -118,15 +84,14 @@ def aggregate_best_across_folders(folders):
                 'c_train': info['c_train'],
                 'c_valid': info['c_valid'],
                 'c_test': info['c_test'],
-                'repeat': info['repeat']
-            }
-            records.append(record)
-    df = pd.DataFrame(records)
-    return df
+                'repeat': info['repeat'],
+                'ext': info['ext'],
+            })
+    return pd.DataFrame(records)
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Aggregate single‑loss runs from specified rep folders and compare c_test across multiple datasets."
+        description="Aggregate single‑loss runs and compare c_test across multiple datasets."
     )
     parser.add_argument('--repeat', type=int, nargs='+', required=True,
                         help="List of repeat numbers to aggregate (e.g. --repeat 21 22 23 24).")
@@ -155,17 +120,37 @@ def main():
         print("No valid single-loss files found. Exiting.")
         return
 
-    # 4) Map repeat -> dataset
-    df['repeat'] = df['repeat'].astype(str)
-    df['dataset'] = df['repeat'].map(REPEAT_DATASET_MAP).fillna(df['repeat'])
+    # 4) Convert ext -> dataset label
+    #    If ext is empty => "PDAC Only"
+    #    Otherwise => "PDAC+{ext}"
+    def map_ext_to_dataset(ext_label):
+        if ext_label == "":
+            return "PDAC Only"
+        else:
+            return f"PDAC+{ext_label}"
 
-    # 5) Determine datasets present
+    df['dataset'] = df['ext'].apply(map_ext_to_dataset)
+
+    # 5) Determine unique datasets in this aggregated data
     unique_datasets = df['dataset'].unique().tolist()
 
-    # 6) Filter preferred order
-    dataset_order = [d for d in PREFERRED_ORDER if d in unique_datasets]
+    # 6) Define a preferred order & color palette matching your final format
+    preferred_order = [
+        "PDAC Only",
+        "PDAC+CHOL",
+        "PDAC+COAD",
+        "PDAC+LUAD",
+        "PDAC+ESCA",
+        "PDAC+LIHC",
+    ]
 
-    # 7) Convert to categorical
+    # Filter the order to only keep those that appear
+    dataset_order = [d for d in preferred_order if d in unique_datasets]
+    # If none matched, fallback to sorted unique
+    if not dataset_order:
+        dataset_order = sorted(unique_datasets)
+
+    # 7) Convert dataset to categorical with the chosen order
     df['dataset'] = pd.Categorical(df['dataset'], categories=dataset_order, ordered=True)
 
     # 8) Save raw CSV
@@ -173,7 +158,7 @@ def main():
     df.to_csv(raw_csv_file, index=False)
     print(f"Saved raw data to {raw_csv_file}")
 
-    # 9) Write sorted text file
+    # 9) Create a text summary
     sorted_txt_file = output_folder / "sorted_by_c_test.txt"
     with open(sorted_txt_file, "w") as f:
         for repeat, group_df in df.groupby("repeat"):
@@ -190,23 +175,26 @@ def main():
             f.write("\n")
     print(f"Saved sorted results to {sorted_txt_file}")
 
-    # 10) Create aggregated plot using Stata s1 colors.
-    # Use a palette for each dataset group.
-    s1_palette = [
-        "#000000",  # black (darker for extra group)
-        "#3B78CB",  # blue
-        "#E41A1C",  # red
-        "#4DAF4A",  # green
-        "#984EA3",  # purple
-        "#FF7F00",  # orange
-        "#999999",  # gray
-        "#F781BF"   # pink
-    ]
-    group_palette = dict(zip(dataset_order, s1_palette[:len(dataset_order)]))
+    # 10) Plot
+    # Use a fixed palette for the known datasets. If new ones appear, they'll be gray.
+    color_map = {
+        "PDAC Only": "#000000",   # black
+        "PDAC+CHOL": "#3B78CB",   # blue
+        "PDAC+COAD": "#E41A1C",   # red
+        "PDAC+LUAD": "#4DAF4A",   # green
+        "PDAC+ESCA": "#984EA3",   # purple
+        "PDAC+LIHC": "#FF7F00",   # orange
+    }
+    # Build final palette from dataset_order, fallback to a default color if missing
+    group_palette = {}
+    default_color = "#999999"
+    for ds in dataset_order:
+        group_palette[ds] = color_map.get(ds, default_color)
 
     fig, ax = plt.subplots(figsize=(12, 8))
     sns.set_style("whitegrid")
-    # Plot individual points with jitter
+
+    # 10a) Stripplot (individual points)
     sns.stripplot(
         data=df,
         x='dataset',
@@ -218,7 +206,7 @@ def main():
         ax=ax,
         dodge=False
     )
-    # Overlay pointplot for mean ± 95% CI using same palette.
+    # 10b) Pointplot (mean ± 95% CI)
     sns.pointplot(
         data=df,
         x='dataset',
@@ -231,19 +219,20 @@ def main():
         dodge=False,
         ci=95
     )
+
     ax.axhline(y=0.5, color="gray", linestyle=":", label="C=0.5")
     ax.axhline(y=0.6, color="gray", linestyle=":", label="C=0.6")
-    ax.axhline(y=0.7, color="gray", linestyle=":", label="C=0.7")  
+    ax.axhline(y=0.7, color="gray", linestyle=":", label="C=0.7")
     ax.set_title(f"Comparison of runs across repeats {repeats_str}\nBest Test C-Index per LR")
     ax.set_xlabel("Dataset")
     ax.set_ylabel("Best Test C-Index")
-    
-    # Build custom legend handles.
+
+    # Build custom legend handles
     handles = []
     for d in dataset_order:
         # Count how many data points belong to this dataset
         d_count = (df['dataset'] == d).sum()
-        label_with_count = f"{d} ({d_count})"  # e.g. "PDAC+CHOL (39)"
+        label_with_count = f"{d} ({d_count})"
         patch = mpatches.Patch(color=group_palette[d], label=label_with_count)
         handles.append(patch)
 
@@ -252,7 +241,7 @@ def main():
                           markersize=9, label="Mean ± 95% CI")
     handles.append(dummy)
     ax.legend(handles=handles, loc='best')
-    
+
     out_fig = output_folder / "compare_datasets.png"
     fig.tight_layout()
     plt.savefig(out_fig, dpi=300, bbox_inches="tight")
