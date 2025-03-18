@@ -50,7 +50,7 @@ WEIGHTS_DIR = RESULTS_DIR / 'Results_weights'
 FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
 
-BATCH_SIZE_MIN, BATCH_SIZE_MAX = 8, 16
+BATCH_SIZE_MIN, BATCH_SIZE_MAX = 16, 64
 CINDEX_MIN = 0.5         # Minimum acceptable test c-index after epoch=0
 MAX_REINIT_ATTEMPTS = 100       # Max times we re-initialize if threshold not met
 BEST_EPOCH_PACIENCE = 50
@@ -208,19 +208,18 @@ def sample_external(preloaded_external, sample_size):
 
     return sampled_features, sampled_time, sampled_events
 
-# Function to perform feature subsampling
 def feature_dropout(features, dropout_rate=0.2):
     """
-    Subsample and dropout features.
-    - Features are randomly dropped (set to zero) based on dropout_rate.
-    - This is done to avoid overfitting and encourage robustness.
+    Randomly drop (set to zero) a fraction of elements along the feature dimension.
+    Assumes that the feature dimension is the last dimension of the input tensor.
     """
-    # Generate a mask for 80% of features, keeping the remaining 20% dropped
-    mask = (torch.rand(features.size(1)) > dropout_rate).float().to(features.device)  # Mask for each feature
-    # Apply mask to features (drop features by setting them to zero)
+    # Create a mask for the feature dimension (features.size(2))
+    mask = (torch.rand(features.size(2)) > dropout_rate).float().to(features.device)
+    # Reshape mask to (1, 1, features.size(2)) so it can broadcast over the first two dimensions
+    mask = mask.unsqueeze(0).unsqueeze(0)
+    # Apply the mask
     features = features * mask
     return features
-
 
 #############################################
 # Main Training Function with Loop Approach
