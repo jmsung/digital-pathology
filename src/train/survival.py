@@ -55,7 +55,7 @@ CINDEX_MIN = 0.5         # Minimum acceptable test c-index after epoch=0
 MAX_REINIT_ATTEMPTS = 100       # Max times we re-initialize if threshold not met
 BEST_EPOCH_PACIENCE = 50
 NUM_EXTERNAL = 160
-DROPOUT_RATE = 0.2
+DROPOUT_RATE = 0.0
 
 #############################################
 # Data Loading Functions (unchanged)
@@ -84,7 +84,7 @@ def getData(args):
     Time, Event = Clinical['PFS_mo'], Clinical['PFS_event_Up220713']
     return Features, Coords, Barcodes, Time, Event
 
-def getDataTCGA_All(args, cancer_types=['LIHC', 'CHOL', 'LUAD', 'COAD', 'ESCA']):
+def getDataTCGA_All(args, cancer_types=['LIHC', 'CHOL', 'LUAD', 'COAD', 'ESCA', 'BRCA']):
     Clinical = pd.read_csv(DATA_DIR / 'clinical' / "TCGA_clinical_data.tsv", sep="\t")
     Clinical.set_index('case_submitter_id', inplace=True)
     Clinical = Clinical.loc[Clinical['cancer_type'].isin(cancer_types)]
@@ -208,7 +208,7 @@ def sample_external(preloaded_external, sample_size):
 
     return sampled_features, sampled_time, sampled_events
 
-def feature_dropout(features, dropout_rate=0.2):
+def feature_dropout(features, dropout_rate=0.0):
     """
     Randomly drop (set to zero) a fraction of elements along the feature dimension.
     Assumes that the feature dimension is the last dimension of the input tensor.
