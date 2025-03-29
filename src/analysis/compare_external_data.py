@@ -142,6 +142,7 @@ def main():
         "PDAC+LUAD",
         "PDAC+ESCA",
         "PDAC+LIHC",
+        "PDAC+BRCA",        
     ]
 
     # Filter the order to only keep those that appear
