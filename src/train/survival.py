@@ -18,6 +18,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 import yaml
 
+# ---------------- Standard Setup ----------------
 # local library imports
 current_dir = Path(__file__).resolve().parent
 modules_dir = current_dir.parent / 'modules'
@@ -56,6 +57,21 @@ MAX_REINIT_ATTEMPTS = 100       # Max times we re-initialize if threshold not me
 BEST_EPOCH_PACIENCE = 50
 NUM_EXTERNAL = 160
 DROPOUT_RATE = 0.0
+
+# ---------------- Global Hyperparameters ----------------
+# Define n_class hyperparameter (set to 1 for survival only, or 2 for survival + classification)
+N_CLASS = 2
+
+BATCH_SELF_LOSS_WEIGHT = 0.05
+if N_CLASS == 1:
+    print('Number of class = 1')
+    CLS_LOSS_WEIGHT = 0
+elif N_CLASS == 2:
+    print('Number of class = 2')
+    CLS_LOSS_WEIGHT = 0.05
+else:
+    raise ValueError("N_CLASS must be either 1 or 2.")
+SURV_LOSS_WEIGHT = 1 - BATCH_SELF_LOSS_WEIGHT - CLS_LOSS_WEIGHT
 
 #############################################
 # Data Loading Functions (unchanged)
@@ -148,7 +164,7 @@ def getDataTCGA_PDAC(args):
     return Features_TCGA, Coords_TCGA, Barcodes_TCGA_out, Clinical_TCGA_final
 
 #############################################
-# Model Loading Function (unchanged)
+# Model Loading Function (updated to use global N_CLASS)
 #############################################
 def getModel(config_file, feature_dim, model_name='ACMIL', lr=1e-5):
     with open(config_file, "r") as ymlfile:
@@ -158,7 +174,7 @@ def getModel(config_file, feature_dim, model_name='ACMIL', lr=1e-5):
     conf.n_masked_patch = 10
     conf.mask_drop = 0.3
     conf.D_feat = feature_dim
-    conf.n_class = 1
+    conf.n_class = N_CLASS  # Set n_class using the global variable
     if model_name == 'ACMIL':
         MODEL = AttnMIL(conf)
     elif model_name == 'CLAM_SB':
@@ -179,6 +195,7 @@ def getModel(config_file, feature_dim, model_name='ACMIL', lr=1e-5):
         MODEL = ABMIL(conf)
     elif model_name == 'GABMIL':
         MODEL = GatedABMIL(conf)
+    # criterion is only used for classification loss (if N_CLASS == 2)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, MODEL.parameters()),
                                   lr=lr, weight_decay=conf.wd)
@@ -222,7 +239,7 @@ def feature_dropout(features, dropout_rate=0.0):
     return features
 
 #############################################
-# Main Training Function with Loop Approach
+# Main Training Function with Loop Approach (UPDATED)
 #############################################
 def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc):
     """
@@ -238,8 +255,7 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
     while True:
         if reinit_attempts >= MAX_REINIT_ATTEMPTS:
             raise RuntimeError(
-                f"Reached {MAX_REINIT_ATTEMPTS} attempts without surpassing "
-                f"CINDEX_MIN={CINDEX_MIN:.3f} at epoch=0. Aborting."
+                f"Reached {MAX_REINIT_ATTEMPTS} attempts without surpassing CINDEX_MIN={CINDEX_MIN:.3f} at epoch=0. Aborting."
             )
 
         print(f"\n*** Attempt #{reinit_attempts+1} / {MAX_REINIT_ATTEMPTS}: must achieve C-index >= {CINDEX_MIN} at epoch=0 ***")
@@ -300,9 +316,7 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
 
         event_mapping = {'Alive': 0, 'Dead': 1}
 
-        # --------------------------------------------------
-        # EPOCH 0 only: check test-set c-index vs threshold
-        # --------------------------------------------------
+        # ---- EPOCH 0 (initial check) ----
         Epoch = 0
         print(f"=== EPOCH {Epoch} (initial check) ===")
 
@@ -330,12 +344,13 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
 
         epoch_loss = 0
         slide_preds_save, times_save, events_save = [], [], []
-
+        slide_cls_list = []  # For collecting classification outputs if applicable
         batch_size = random.randint(BATCH_SIZE_MIN, BATCH_SIZE_MAX)
 
         for batch_idx in tqdm(range(0, len(train_idx_list), batch_size)):
             batch_self_loss = torch.tensor(0.0, device=args.device, requires_grad=True)
             slide_preds = []
+            slide_cls = []  # Temporary list for classification outputs in current batch
             times_ = []
             events_ = []
             optimizer.zero_grad()
@@ -345,18 +360,33 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                     break
                 cur_idx = train_idx_list[idx_]
 
-                # forward pass
+                # Use updated forward pass if N_CLASS == 2; otherwise original
                 if args.model_name == 'ACMIL':
-                    self_loss, slide_pred = run_one_sample(featureRandomSelection(TRAIN_FEATURES[cur_idx]),
-                                                           MODEL, conf, args.device)
-                    if slide_pred is None:
-                        continue
-                    if not isinstance(self_loss, torch.Tensor):
-                        self_loss = torch.tensor(self_loss, device=args.device)
-                    batch_self_loss += self_loss
+                    if conf.n_class == 2:
+                        self_loss, outputs = run_one_sample(featureRandomSelection(TRAIN_FEATURES[cur_idx]),
+                                                            MODEL, conf, args.device)
+                        if outputs is None:
+                            continue
+                        slide_pred, slide_class = outputs
+                        if not isinstance(self_loss, torch.Tensor):
+                            self_loss = torch.tensor(self_loss, device=args.device)
+                        batch_self_loss += self_loss
+                        slide_cls.append(slide_class)
+                    else:
+                        self_loss, slide_pred = run_one_sample(featureRandomSelection(TRAIN_FEATURES[cur_idx]),
+                                                               MODEL, conf, args.device)
+                        if slide_pred is None:
+                            continue
+                        if not isinstance(self_loss, torch.Tensor):
+                            self_loss = torch.tensor(self_loss, device=args.device)
+                        batch_self_loss += self_loss
                 else:
                     Feature_ = torch.from_numpy(featureRandomSelection(TRAIN_FEATURES[cur_idx])).unsqueeze(0).float().to(args.device)
-                    slide_pred = MODEL(Feature_)
+                    if conf.n_class == 2:
+                        slide_pred, slide_class = MODEL(Feature_)  # unpack two outputs
+                        slide_cls.append(slide_class)
+                    else:
+                        slide_pred = MODEL(Feature_)
                 slide_preds.append(slide_pred)
                 times_.append(TRAIN_TIME.iloc[cur_idx])
                 events_.append(TRAIN_EVENT.iloc[cur_idx])
@@ -365,9 +395,9 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                 continue
 
             preds = torch.vstack(slide_preds)[:, 0]
-            numerical_events = [
-                event_mapping[e] if isinstance(e, str) else e for e in events_
-            ]
+            if conf.n_class == 2:
+                cls_logits = torch.vstack(slide_cls)
+            numerical_events = [event_mapping[e] if isinstance(e, str) else e for e in events_]
             times_tensor = torch.tensor(times_).to(args.device)
             events_tensor = torch.tensor(numerical_events, dtype=torch.float32).to(args.device)
 
@@ -386,8 +416,13 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                     loss2_val = -loss2_val
                 Surv_loss = loss1_val * args.loss_weight + loss2_val * (1 - args.loss_weight)
 
-            # Combine with self_loss
-            final_loss = batch_self_loss * 0.05 + Surv_loss * 0.95
+            if conf.n_class == 2:
+                target_cls = torch.tensor(numerical_events, dtype=torch.long).to(args.device)
+                cls_loss = criterion(cls_logits, target_cls)
+                final_loss = batch_self_loss * BATCH_SELF_LOSS_WEIGHT + Surv_loss * SURV_LOSS_WEIGHT + cls_loss * CLS_LOSS_WEIGHT
+            else:
+                final_loss = batch_self_loss * BATCH_SELF_LOSS_WEIGHT + Surv_loss * (SURV_LOSS_WEIGHT + CLS_LOSS_WEIGHT)
+
             epoch_loss += final_loss.item()
             final_loss.backward()
             optimizer.step()
@@ -413,10 +448,17 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
         for idx_ in range(len(VALID_FEATURES)):
             with torch.no_grad():
                 if args.model_name == 'ACMIL':
-                    _, slide_pred = run_one_sample(VALID_FEATURES[idx_], MODEL, conf, args.device)
+                    if conf.n_class == 2:
+                        _, outputs = run_one_sample(VALID_FEATURES[idx_], MODEL, conf, args.device)
+                        slide_pred, _ = outputs
+                    else:
+                        _, slide_pred = run_one_sample(VALID_FEATURES[idx_], MODEL, conf, args.device)
                 else:
                     feat_ = torch.from_numpy(featureRandomSelection(VALID_FEATURES[idx_])).unsqueeze(0).float().to(args.device)
-                    slide_pred = MODEL(feat_)
+                    if conf.n_class == 2:
+                        slide_pred, _ = MODEL(feat_)
+                    else:
+                        slide_pred = MODEL(feat_)
                 val_slide_preds.append(-slide_pred.item())
                 val_times.append(VALID_TIME.iloc[idx_])
                 val_events.append(VALID_EVENT.iloc[idx_])
@@ -433,30 +475,31 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
         for idx_ in range(len(NCC_Features)):
             with torch.no_grad():
                 if args.model_name == 'ACMIL':
-                    _, slide_pred = run_one_sample(NCC_Features[idx_], MODEL, conf, args.device)
+                    if conf.n_class == 2:
+                        _, outputs = run_one_sample(NCC_Features[idx_], MODEL, conf, args.device)
+                        slide_pred, _ = outputs
+                    else:
+                        _, slide_pred = run_one_sample(NCC_Features[idx_], MODEL, conf, args.device)
                 else:
                     feat_ = torch.from_numpy(featureRandomSelection(NCC_Features[idx_])).unsqueeze(0).float().to(args.device)
-                    slide_pred = MODEL(feat_)
+                    if conf.n_class == 2:
+                        slide_pred, _ = MODEL(feat_)
+                    else:
+                        slide_pred = MODEL(feat_)
                 ncc_preds.append(-slide_pred.item())
                 ncc_times.append(NCC_TIME.iloc[idx_])
                 ncc_events_.append(NCC_EVENT.iloc[idx_])
         data_test_0 = pd.DataFrame({
             'risk': np.array(ncc_preds),
             'times': ncc_times,
-            'events': pd.to_numeric(ncc_events_, errors='coerce')
+            'events': pd.to_numeric(NCC_EVENT, errors='coerce')
         }).dropna(subset=['events'])
         test_cindex_0 = concordance_index(data_test_0['times'], data_test_0['risk'], data_test_0['events'])
-
-        current_test_cindex = concordance_index(
-            data_test_0['times'], data_test_0['risk'], data_test_0['events']
-        )
+        current_test_cindex = test_cindex_0
 
         # 3) Decide if we continue or re-init
         if min([train_cindex_0, valid_cindex_0, test_cindex_0]) < CINDEX_MIN:
-            print(
-                f"*** C-index={train_cindex_0:.2f}, {valid_cindex_0:.2f}, {test_cindex_0:.2f} < {CINDEX_MIN}. "
-                "Re-initializing data/model... ***"
-            )
+            print(f"*** C-index={train_cindex_0:.2f}, {valid_cindex_0:.2f}, {test_cindex_0:.2f} < {CINDEX_MIN}. Re-initializing data/model... ***")
             reinit_attempts += 1
             continue  # Start from top of while loop again
         else:
@@ -495,12 +538,13 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
 
         trn_loss = 0
         slide_preds_save, times_save, events_save = [], [], []
-
+        slide_cls_list = []  # for classification outputs if applicable
         batch_size = random.randint(BATCH_SIZE_MIN, BATCH_SIZE_MAX)
 
         for batch_idx in tqdm(range(0, len(train_idx_list), batch_size)):
             batch_self_loss = torch.tensor(0.0, device=args.device, requires_grad=True)
             slide_preds = []
+            slide_cls = []  # for current batch classification outputs
             times_ = []
             events_ = []
             optimizer.zero_grad()
@@ -511,13 +555,24 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                 cur_idx = train_idx_list[idx_]
 
                 if args.model_name == 'ACMIL':
-                    self_loss, slide_pred = run_one_sample(featureRandomSelection(TRAIN_FEATURES[cur_idx]),
-                                                           MODEL, conf, args.device)
-                    if slide_pred is None:
-                        continue
-                    if not isinstance(self_loss, torch.Tensor):
-                        self_loss = torch.tensor(self_loss, device=args.device)
-                    batch_self_loss += self_loss
+                    if conf.n_class == 2:
+                        self_loss, outputs = run_one_sample(featureRandomSelection(TRAIN_FEATURES[cur_idx]),
+                                                            MODEL, conf, args.device)
+                        if outputs is None:
+                            continue
+                        slide_pred, slide_class = outputs
+                        if not isinstance(self_loss, torch.Tensor):
+                            self_loss = torch.tensor(self_loss, device=args.device)
+                        batch_self_loss += self_loss
+                        slide_cls.append(slide_class)
+                    else:
+                        self_loss, slide_pred = run_one_sample(featureRandomSelection(TRAIN_FEATURES[cur_idx]),
+                                                               MODEL, conf, args.device)
+                        if slide_pred is None:
+                            continue
+                        if not isinstance(self_loss, torch.Tensor):
+                            self_loss = torch.tensor(self_loss, device=args.device)
+                        batch_self_loss += self_loss
                 else:
                     feat_ = torch.from_numpy(featureRandomSelection(TRAIN_FEATURES[cur_idx])).unsqueeze(0).float().to(args.device)
                     
@@ -533,13 +588,12 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                 continue
 
             preds = torch.vstack(slide_preds)[:, 0]
-            numerical_events = [
-                event_mapping[e] if isinstance(e, str) else e for e in events_
-            ]
+            if conf.n_class == 2:
+                cls_logits = torch.vstack(slide_cls)
+            numerical_events = [event_mapping[e] if isinstance(e, str) else e for e in events_]
             times_tensor = torch.tensor(times_).to(args.device)
             events_tensor = torch.tensor(numerical_events, dtype=torch.float32).to(args.device)
 
-            # Compute survival loss
             if len(indices) == 1:
                 sel_loss_fn = loss_funcs[indices[0]]
                 Surv_loss = sel_loss_fn(preds, times_tensor, events_tensor)
@@ -554,7 +608,13 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                     loss2_val = -loss2_val
                 Surv_loss = loss1_val * args.loss_weight + loss2_val * (1 - args.loss_weight)
 
-            final_loss = batch_self_loss * 0.05 + Surv_loss * 0.95
+            if conf.n_class == 2:
+                target_cls = torch.tensor(numerical_events, dtype=torch.long).to(args.device)
+                cls_loss = criterion(cls_logits, target_cls)
+                final_loss = batch_self_loss * BATCH_SELF_LOSS_WEIGHT + Surv_loss * SURV_LOSS_WEIGHT + cls_loss * CLS_LOSS_WEIGHT
+            else:
+                final_loss = batch_self_loss * BATCH_SELF_LOSS_WEIGHT + Surv_loss * (SURV_LOSS_WEIGHT + CLS_LOSS_WEIGHT)
+
             trn_loss += final_loss.item()
             final_loss.backward()
             optimizer.step()
@@ -565,36 +625,37 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
             events_save.extend(events_)
 
         print(f"Epoch {Epoch}, Training Loss: {trn_loss:.4f}")
-
-        # Clear GPU memory after each epoch
         torch.cuda.empty_cache()
 
-        # Evaluate on test (NCC)
         MODEL.eval()
         ncc_preds, ncc_times, ncc_events_ = [], [], []
         for idx_ in range(len(NCC_Features)):
             with torch.no_grad():
                 if args.model_name == 'ACMIL':
-                    _, slide_pred = run_one_sample(NCC_Features[idx_], MODEL, conf, args.device)
+                    if conf.n_class == 2:
+                        _, outputs = run_one_sample(NCC_Features[idx_], MODEL, conf, args.device)
+                        slide_pred, _ = outputs
+                    else:
+                        _, slide_pred = run_one_sample(NCC_Features[idx_], MODEL, conf, args.device)
                 else:
                     feat_ = torch.from_numpy(featureRandomSelection(NCC_Features[idx_])).unsqueeze(0).float().to(args.device)
-                    slide_pred = MODEL(feat_)
+                    if conf.n_class == 2:
+                        slide_pred, _ = MODEL(feat_)
+                    else:
+                        slide_pred = MODEL(feat_)
                 ncc_preds.append(-slide_pred.item())
                 ncc_times.append(NCC_TIME.iloc[idx_])
                 ncc_events_.append(NCC_EVENT.iloc[idx_])
         data_test = pd.DataFrame({
             'risk': np.array(ncc_preds),
             'times': ncc_times,
-            'events': pd.to_numeric(ncc_events_, errors='coerce')
+            'events': pd.to_numeric(NCC_EVENT, errors='coerce')
         }).dropna(subset=['events'])
         data_test['PredClass'] = data_test['risk'] < data_test['risk'].median()
 
-        current_test_cindex = concordance_index(
-            data_test['times'], data_test['risk'], data_test['events']
-        )
+        current_test_cindex = concordance_index(data_test['times'], data_test['risk'], data_test['events'])
         print(f"Epoch {Epoch}: Test C-index: {current_test_cindex:.3f}")
 
-        # Early stopping logic
         if current_test_cindex > best_test_cindex:
             best_test_cindex = current_test_cindex
             best_epoch = Epoch
@@ -605,13 +666,9 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                 print(f"no_improve_count = {no_improve_count} (BEST_EPOCH_PACIENCE = {BEST_EPOCH_PACIENCE})")
 
         if no_improve_count >= BEST_EPOCH_PACIENCE:
-            print(
-                f"Early stopping triggered at epoch {Epoch}. "
-                f"Best test c-index: {best_test_cindex:.3f} at epoch {best_epoch}"
-            )
+            print(f"Early stopping triggered at epoch {Epoch}. Best test c-index: {best_test_cindex:.3f} at epoch {best_epoch}")
             break
 
-        # Evaluate train/valid sets + log
         data_train = pd.DataFrame({
             'risk': np.array(slide_preds_save),
             'times': times_save,
@@ -623,10 +680,17 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
         for idx_ in range(len(VALID_FEATURES)):
             with torch.no_grad():
                 if args.model_name == 'ACMIL':
-                    _, slide_pred = run_one_sample(VALID_FEATURES[idx_], MODEL, conf, args.device)
+                    if conf.n_class == 2:
+                        _, outputs = run_one_sample(VALID_FEATURES[idx_], MODEL, conf, args.device)
+                        slide_pred, _ = outputs
+                    else:
+                        _, slide_pred = run_one_sample(VALID_FEATURES[idx_], MODEL, conf, args.device)
                 else:
                     feat_ = torch.from_numpy(featureRandomSelection(VALID_FEATURES[idx_])).unsqueeze(0).float().to(args.device)
-                    slide_pred = MODEL(feat_)
+                    if conf.n_class == 2:
+                        slide_pred, _ = MODEL(feat_)
+                    else:
+                        slide_pred = MODEL(feat_)
                 val_slide_preds.append(-slide_pred.item())
                 val_times.append(VALID_TIME.iloc[idx_])
                 val_events.append(VALID_EVENT.iloc[idx_])
@@ -640,7 +704,6 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
         print("data_train shape:", data_train.shape)
         print(data_train.head())
 
-        # Log-rank tests + c-index
         log_ranks = [
             logRankTest(data_train),
             logRankTest(data_valid),
@@ -674,10 +737,7 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
         torch.save(MODEL.state_dict(), weights_file)
         print(f"Saved model weights to {weights_file}\n")
 
-    print(
-        f"\nTraining complete. Best test c-index={best_test_cindex:.3f} at epoch {best_epoch} "
-        f"(initial attempt(s) needed={reinit_attempts})."
-    )
+    print(f"\nTraining complete. Best test c-index={best_test_cindex:.3f} at epoch {best_epoch} (initial attempt(s) needed={reinit_attempts}).")
 
 #############################################
 # Main Entry Point
@@ -721,7 +781,7 @@ if __name__ == '__main__':
                 args.model_name = model_name
                 args.loss = loss_str
                 args.current_lr = lr
-                print(f"\nTraining with Model: {model_name}, Loss: {loss_str}, Learning Rate: {lr:.2e}")
+                print(f"\nTraining with Model: {model_name}, Loss: {loss_str}, Learning Rate: {lr:.2e}, n_class: {N_CLASS}")
                 train_model(
                     args, 
                     configs={
