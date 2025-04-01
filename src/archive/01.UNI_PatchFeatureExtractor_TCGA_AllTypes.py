@@ -48,7 +48,6 @@ import timm
 from timm.data import resolve_data_config
 from timm.data.transforms_factory import create_transform
 from huggingface_hub import login, hf_hub_download
-login('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')
 
 def get_pretrained_url(key):
     URL_PREFIX = "https://github.com/lunit-io/benchmark-ssl-pathology/releases/download/pretrained-weights"
