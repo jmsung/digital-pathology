@@ -68,7 +68,7 @@ if N_CLASS == 1:
     CLS_LOSS_WEIGHT = 0
 elif N_CLASS == 2:
     print('Number of class = 2')
-    CLS_LOSS_WEIGHT = 0.05
+    CLS_LOSS_WEIGHT = 0.1
 else:
     raise ValueError("N_CLASS must be either 1 or 2.")
 SURV_LOSS_WEIGHT = 1 - BATCH_SELF_LOSS_WEIGHT - CLS_LOSS_WEIGHT
@@ -244,7 +244,7 @@ def feature_dropout(features, dropout_rate=0.0):
 def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc):
     """
     This version:
-      1) Requires the epoch=0 test C-index to be >= TEST_CINDEX_MIN,
+      1) Requires the epoch=0 test C-index to be >= CINDEX_MIN,
          else we re-initialize data + model (up to MAX_REINIT_ATTEMPTS).
       2) Once threshold is met, normal early-stopping is applied for subsequent epochs.
       3) Flips the sign of model output so 'risk' is higher => worse survival.
@@ -319,8 +319,6 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
         # ---- EPOCH 0 (initial check) ----
         Epoch = 0
         print(f"=== EPOCH {Epoch} (initial check) ===")
-
-        # 1) Train on this single epoch
         MODEL.train()
 
         # By default, use all internal data
@@ -330,10 +328,7 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
 
         # Only add external data if available
         if args.ExternalDatasets and preloaded_external is not None:
-            # Sample exactly NUM_EXTERNAL external items (or fewer if external set is smaller)
             ext_features, ext_time, ext_event = sample_external(preloaded_external, NUM_EXTERNAL)
-            
-            # Concatenate entire internal data with the external data
             TRAIN_FEATURES += ext_features
             TRAIN_TIME = pd.concat([TRAIN_TIME, ext_time], axis=0)
             TRAIN_EVENT = pd.concat([TRAIN_EVENT, ext_event], axis=0)
@@ -360,7 +355,7 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                     break
                 cur_idx = train_idx_list[idx_]
 
-                # Use updated forward pass if N_CLASS == 2; otherwise original
+                # For ACMIL branch using run_one_sample
                 if args.model_name == 'ACMIL':
                     if conf.n_class == 2:
                         self_loss, outputs = run_one_sample(featureRandomSelection(TRAIN_FEATURES[cur_idx]),
@@ -383,10 +378,13 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                 else:
                     Feature_ = torch.from_numpy(featureRandomSelection(TRAIN_FEATURES[cur_idx])).unsqueeze(0).float().to(args.device)
                     if conf.n_class == 2:
-                        slide_pred, slide_class = MODEL(Feature_)  # unpack two outputs
+                        slide_pred, slide_class = MODEL(Feature_)
                         slide_cls.append(slide_class)
                     else:
                         slide_pred = MODEL(Feature_)
+                # Ensure slide_pred is a tensor (if it is a tuple, extract the first element)
+                if isinstance(slide_pred, (tuple, list)):
+                    slide_pred = slide_pred[0]
                 slide_preds.append(slide_pred)
                 times_.append(TRAIN_TIME.iloc[cur_idx])
                 events_.append(TRAIN_EVENT.iloc[cur_idx])
@@ -435,7 +433,6 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
 
         print(f"Epoch {Epoch}, Training Loss: {epoch_loss:.4f}")
 
-        # First Train on this single epoch0
         data_train_0 = pd.DataFrame({
             'risk': np.array(slide_preds_save),
             'times': times_save,
@@ -443,7 +440,7 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
         }).dropna(subset=['times', 'risk', 'events'])
         train_cindex_0 = concordance_index(data_train_0['times'], data_train_0['risk'], data_train_0['events'])
 
-        # First Valid on this single epoch0
+        # ---- Validation Evaluation ----
         val_slide_preds, val_times, val_events = [], [], []
         for idx_ in range(len(VALID_FEATURES)):
             with torch.no_grad():
@@ -459,6 +456,8 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                         slide_pred, _ = MODEL(feat_)
                     else:
                         slide_pred = MODEL(feat_)
+                if isinstance(slide_pred, (tuple,list)):
+                    slide_pred = slide_pred[0]
                 val_slide_preds.append(-slide_pred.item())
                 val_times.append(VALID_TIME.iloc[idx_])
                 val_events.append(VALID_EVENT.iloc[idx_])
@@ -469,7 +468,7 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
         }).dropna(subset=['times','risk','events'])
         valid_cindex_0 = concordance_index(data_valid_0['times'], data_valid_0['risk'], data_valid_0['events'])
 
-        # First Test on this single epoch0 (NCC)
+        # ---- Test Evaluation (NCC) ----
         MODEL.eval()
         ncc_preds, ncc_times, ncc_events_ = [], [], []
         for idx_ in range(len(NCC_Features)):
@@ -486,6 +485,8 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                         slide_pred, _ = MODEL(feat_)
                     else:
                         slide_pred = MODEL(feat_)
+                if isinstance(slide_pred, (tuple,list)):
+                    slide_pred = slide_pred[0]
                 ncc_preds.append(-slide_pred.item())
                 ncc_times.append(NCC_TIME.iloc[idx_])
                 ncc_events_.append(NCC_EVENT.iloc[idx_])
@@ -497,18 +498,15 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
         test_cindex_0 = concordance_index(data_test_0['times'], data_test_0['risk'], data_test_0['events'])
         current_test_cindex = test_cindex_0
 
-        # 3) Decide if we continue or re-init
         if min([train_cindex_0, valid_cindex_0, test_cindex_0]) < CINDEX_MIN:
             print(f"*** C-index={train_cindex_0:.2f}, {valid_cindex_0:.2f}, {test_cindex_0:.2f} < {CINDEX_MIN}. Re-initializing data/model... ***")
             reinit_attempts += 1
-            continue  # Start from top of while loop again
+            continue
         else:
-            # We break out of the while loop to proceed with the full training
             break
 
     # ------------------------------------------------------
-    # If here, it means epoch-0 C-index passed the threshold
-    # We proceed with the remaining epochs (1..args.Epoch-1)
+    # Remaining Epochs
     # ------------------------------------------------------
     best_test_cindex = current_test_cindex
     best_epoch = 0
@@ -516,18 +514,12 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
 
     for Epoch in range(1, args.Epoch):
         MODEL.train()
-
-        # By default, use all internal data
         TRAIN_FEATURES = internal_train_features[:]
         TRAIN_TIME = internal_train_time.copy()
         TRAIN_EVENT = internal_train_event.copy()
 
-        # Only add external data if available
         if args.ExternalDatasets and preloaded_external is not None:
-            # Sample exactly NUM_EXTERNAL external items (or fewer if external set is smaller)
             ext_features, ext_time, ext_event = sample_external(preloaded_external, NUM_EXTERNAL)
-            
-            # Concatenate entire internal data with the external data
             TRAIN_FEATURES += ext_features
             TRAIN_TIME = pd.concat([TRAIN_TIME, ext_time], axis=0)
             TRAIN_EVENT = pd.concat([TRAIN_EVENT, ext_event], axis=0)
@@ -553,7 +545,6 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                 if idx_ >= len(train_idx_list):
                     break
                 cur_idx = train_idx_list[idx_]
-
                 if args.model_name == 'ACMIL':
                     if conf.n_class == 2:
                         self_loss, outputs = run_one_sample(featureRandomSelection(TRAIN_FEATURES[cur_idx]),
@@ -575,11 +566,14 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                         batch_self_loss += self_loss
                 else:
                     feat_ = torch.from_numpy(featureRandomSelection(TRAIN_FEATURES[cur_idx])).unsqueeze(0).float().to(args.device)
-                    
-                    # Apply feature dropout to features
-                    feat_ = feature_dropout(feat_, dropout_rate=DROPOUT_RATE)  # Drop 20% of features
-                    
-                    slide_pred = MODEL(feat_)
+                    feat_ = feature_dropout(feat_, dropout_rate=DROPOUT_RATE)
+                    if conf.n_class == 2:
+                        slide_pred, slide_class = MODEL(feat_)
+                        slide_cls.append(slide_class)
+                    else:
+                        slide_pred = MODEL(feat_)
+                if isinstance(slide_pred, (tuple,list)):
+                    slide_pred = slide_pred[0]
                 slide_preds.append(slide_pred)
                 times_.append(TRAIN_TIME.iloc[cur_idx])
                 events_.append(TRAIN_EVENT.iloc[cur_idx])
@@ -643,6 +637,8 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                         slide_pred, _ = MODEL(feat_)
                     else:
                         slide_pred = MODEL(feat_)
+                if isinstance(slide_pred, (tuple,list)):
+                    slide_pred = slide_pred[0]
                 ncc_preds.append(-slide_pred.item())
                 ncc_times.append(NCC_TIME.iloc[idx_])
                 ncc_events_.append(NCC_EVENT.iloc[idx_])
@@ -691,6 +687,8 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                         slide_pred, _ = MODEL(feat_)
                     else:
                         slide_pred = MODEL(feat_)
+                if isinstance(slide_pred, (tuple,list)):
+                    slide_pred = slide_pred[0]
                 val_slide_preds.append(-slide_pred.item())
                 val_times.append(VALID_TIME.iloc[idx_])
                 val_events.append(VALID_EVENT.iloc[idx_])
