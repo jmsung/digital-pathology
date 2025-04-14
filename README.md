@@ -1,6 +1,6 @@
 # Pancreatic Cancer Survival Prediction Using Digital Pathology and MIL
 
-Jeong Hoon Lee (Stanford University School of Medicine) and Jongmin Sung (Roche)
+Jongmin Sung (Roche) and Jeong Hoon Lee (Stanford University School of Medicine)
 
 ## Overview
 
