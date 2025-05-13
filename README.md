@@ -1,5 +1,7 @@
 # Pancreatic Cancer Survival Prediction Using Digital Pathology and MIL
 
+Jongmin Sung (Roche) and Jeong Hoon Lee (Stanford University School of Medicine)
+
 ## Overview
 
 This project employs a deep learning pipeline for predicting patient survival in pancreatic cancer using whole slide images (WSIs). The approach builds on our previous work by adapting and extending our multiple instance learning (MIL) framework. We use the TCGA PDAC dataset for training and external data from the National Cancer Institute for validation. In addition, external datasets from different tissue types (CHOL, COAD, LUAD, ESCA, LIHC, BRCA) are incorporated to capture more generalized pattern information.
