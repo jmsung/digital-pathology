@@ -138,11 +138,11 @@ def main():
     preferred_order = [
         "PDAC Only",
         "PDAC+CHOL",
-        "PDAC+ESCA",
         "PDAC+LUAD",
-        "PDAC+BRCA",    
         "PDAC+LIHC",
+        "PDAC+ESCA",
         "PDAC+COAD",
+        "PDAC+BRCA",    
     ]
 
     # Filter the order to only keep those that appear
