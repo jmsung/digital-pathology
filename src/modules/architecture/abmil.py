@@ -3,58 +3,57 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class ABMIL(nn.Module):
-    def __init__(self, conf, num_organs: int = 1):
-        super().__init__()
+    def __init__(self, conf):
+        super(ABMIL, self).__init__()
         self.M = conf.D_feat
         self.L = conf.D_inner
         self.n_class = conf.n_class
         self.ATTENTION_BRANCHES = 1
 
-        # learnable organ embeddings
-        self.organ_embed = nn.Embedding(num_organs, self.M)
-
+        # Attention branch remains the same
         self.attention = nn.Sequential(
-            nn.Linear(self.M, self.L),
+            nn.Linear(self.M, self.L),  # matrix V
             nn.Tanh(),
-            nn.Linear(self.L, self.ATTENTION_BRANCHES),
+            nn.Linear(self.L, self.ATTENTION_BRANCHES)  # vector w if ATTENTION_BRANCHES==1
         )
-
+        
         if self.n_class == 1:
-            self.classifier = nn.Linear(self.M, 1)
+            # Single output: survival risk only
+            self.classifier = nn.Sequential(
+                nn.Linear(self.M, 1)
+            )
+        elif self.n_class == 2:
+            # Dual outputs: survival risk and classification (2 logits)
+            self.survival_head = nn.Linear(self.M, 1)
+            self.classification_head = nn.Sequential(
+                nn.Linear(self.M, 2)
+            )
         else:
-            self.survival_head       = nn.Linear(self.M, 1)
-            self.classification_head = nn.Linear(self.M, 2)
+            raise ValueError("n_class must be either 1 or 2")
 
-    def forward(self, x, organ_idx: torch.LongTensor = None, return_att=False):
-        # x: [1, K, M]  →  H: [K, M]
+    def forward(self, x, return_att=False):
+        # Expect input x shape: [1, K, M]; squeeze first dimension -> [K, M]
         H = x.squeeze(0)
+        A = self.attention(H)         # shape: [K, ATTENTION_BRANCHES]
+        A = torch.transpose(A, 1, 0)    # shape: [ATTENTION_BRANCHES, K]
+        A = F.softmax(A, dim=1)         # softmax over K
+        Z = torch.mm(A, H)            # shape: [ATTENTION_BRANCHES, M]
 
-        # 1) Add organ embedding (if given) to every instance
-        if organ_idx is not None:
-            # embedding returns [1, M] if organ_idx is [1], so squeeze to [M]
-            e = self.organ_embed(organ_idx).squeeze(0)   # → [M]
-            H = H + e                                   # → broadcast to [K, M]
-
-        # 2) Compute attention scores
-        A = self.attention(H)   # → [K, 1]
-        # flatten into a 1×K row vector, then softmax over the K patches
-        A = A.view(1, -1)       # → [1, K]
-        A = F.softmax(A, dim=1) # → [1, K]
-
-        # 3) Pool
-        Z = torch.mm(A, H)      # → [1, M]
-
-        # 4) Heads
         if self.n_class == 1:
-            risk = self.classifier(Z)                # → [1,1]
-            return (risk, A) if return_att else risk
-
-        surv = self.survival_head(Z)                  # → [1,1]
-        cls  = self.classification_head(Z)            # → [1,2]
-        if return_att:
-            return (surv, cls), A
-        else:
-            return surv, cls
+            # Return survival risk only
+            risk = self.classifier(Z)   # shape: [ATTENTION_BRANCHES, 1]
+            if return_att:
+                return risk, A
+            else:
+                return risk
+        elif self.n_class == 2:
+            # Compute survival and classification outputs separately
+            survival_pred = self.survival_head(Z)         # shape: [ATTENTION_BRANCHES, 1]
+            class_pred = self.classification_head(Z)        # shape: [ATTENTION_BRANCHES, 2]
+            if return_att:
+                return (survival_pred, class_pred), A
+            else:
+                return survival_pred, class_pred
 
     # AUXILIARY METHODS (unchanged)
     def calculate_classification_error(self, X, Y):

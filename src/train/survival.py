@@ -51,7 +51,6 @@ WEIGHTS_DIR = RESULTS_DIR / 'Results_weights'
 FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
 
-# ---------------- Global Hyperparameters ----------------
 BATCH_SIZE_MIN, BATCH_SIZE_MAX = 16, 64
 CINDEX_MIN = 0.5         # Minimum acceptable test c-index after epoch=0
 MAX_REINIT_ATTEMPTS = 100       # Max times we re-initialize if threshold not met
@@ -59,12 +58,9 @@ BEST_EPOCH_PACIENCE = 50
 NUM_EXTERNAL = 160
 DROPOUT_RATE = 0.0
 
-# Define organ types
-organ_types = ['PDAC', 'CHOL', 'COAD', 'LUAD', 'ESCA', 'LIHC', 'BRCA']
-N_ORGANS = len(organ_types)
-
+# ---------------- Global Hyperparameters ----------------
 # Define n_class hyperparameter (set to 1 for survival only, or 2 for survival + classification)
-N_CLASS = 1
+N_CLASS = 2
 
 BATCH_SELF_LOSS_WEIGHT = 0.05
 if N_CLASS == 1:
@@ -102,11 +98,9 @@ def getData(args):
         Barcodes.append(curBarcode)
     Clinical = Clinical.loc[[fn.split('.svs')[0] for fn in Filenames]]
     Time, Event = Clinical['PFS_mo'], Clinical['PFS_event_Up220713']
-    # ◀◀ UPDATED: assign organ_id 0 ("PDAC") to all    
-    organ_ids = [organ_types.index('PDAC')] * len(Features)
-    return Features, Coords, Barcodes, Time, Event, organ_ids
+    return Features, Coords, Barcodes, Time, Event
 
-def getDataTCGA_All(args, cancer_types=organ_types):
+def getDataTCGA_All(args, cancer_types=['LIHC', 'CHOL', 'LUAD', 'COAD', 'ESCA', 'BRCA']):
     Clinical = pd.read_csv(DATA_DIR / 'clinical' / "TCGA_clinical_data.tsv", sep="\t")
     Clinical.set_index('case_submitter_id', inplace=True)
     Clinical = Clinical.loc[Clinical['cancer_type'].isin(cancer_types)]
@@ -119,7 +113,6 @@ def getDataTCGA_All(args, cancer_types=organ_types):
     Filenames = [filename for filename in Filenames if filename[:12] in Clinical.index.tolist()]
     Clinical = Clinical.loc[Barcodes]
     Features, Coords, Barcodes_out = [], [], []
-    organ_ids = []
     for slide_idx in tqdm(range(len(Filenames))):
         curBarcode = Filenames[slide_idx]
         try:
@@ -133,19 +126,7 @@ def getDataTCGA_All(args, cancer_types=organ_types):
         Features.append(Feature)
         Coords.append(np.array(Coord))
         Barcodes_out.append(curBarcode)
-        # ◀◀ NEW: fetch this slide’s organ index
-        # pull out the cancer_type entry (might be a Series if index is duplicated)
-        ct_entry = Clinical.loc[curBarcode[:12], 'cancer_type']
-
-        # if it’s a Series take the first element, otherwise it's already a scalar
-        if isinstance(ct_entry, pd.Series):
-            ct = ct_entry.iloc[0]
-        else:
-            ct = ct_entry
-        organ_ids.append(organ_types.index(ct))
-
-    return Features, Coords, Barcodes_out, Clinical['time'], (Clinical['status']=="Dead").astype(int), organ_ids
-
+    return Features, Coords, Barcodes_out, Clinical['time'], (Clinical['status'] == "Dead").astype(int)
 
 def getDataTCGA_PDAC(args):
     TCGA_path = FEATURES_DIR / "Features_TCGA"
@@ -180,10 +161,7 @@ def getDataTCGA_PDAC(args):
         Coords_TCGA.append(np.array(Coord_TCGA))
         Barcodes_TCGA_out.append(curBarcode)
     Clinical_TCGA_final = Clinical_TCGA_final.loc[[i[:12] for i in Barcodes_TCGA_out]]
-    # ◀◀ UPDATED: all these are also PDAC
-    organ_ids = [organ_types.index('PDAC')] * len(Features_TCGA)
-    return Features_TCGA, Coords_TCGA, Barcodes_TCGA_out, Clinical_TCGA_final, organ_ids    
-
+    return Features_TCGA, Coords_TCGA, Barcodes_TCGA_out, Clinical_TCGA_final
 
 #############################################
 # Model Loading Function (updated to use global N_CLASS)
@@ -214,7 +192,7 @@ def getModel(config_file, feature_dim, model_name='ACMIL', lr=1e-5):
     elif model_name == 'MaxMIL':
         MODEL = mean_max.MaxMIL(conf)
     elif model_name == 'ABMIL':
-        MODEL = ABMIL(conf, num_organs=N_ORGANS)
+        MODEL = ABMIL(conf)
     elif model_name == 'GABMIL':
         MODEL = GatedABMIL(conf)
     # criterion is only used for classification loss (if N_CLASS == 2)
@@ -235,17 +213,17 @@ def sample_external(preloaded_external, sample_size):
     preloaded_external is a tuple: (features, coords, barcodes, time, events)
     Returns: (sampled_features, sampled_time, sampled_events)
     """
-    features_all, _, _, time_all, events_all, organs_all = preloaded_external  # organ list added
+    features_all, _, _, time_all, events_all = preloaded_external
     total = len(features_all)
+    # If sample_size exceeds total, we just use all external data
     actual_size = min(sample_size, total)
-    indices = np.random.choice(total, size=actual_size, replace=False)
-    sampled_features = [features_all[i]  for i in indices]
-    sampled_time     = time_all.iloc[indices]
-    sampled_events   = events_all.iloc[indices]
-    # ◀◀ UPDATED
-    sampled_organs   = [organs_all[i] for i in indices]
-    return sampled_features, sampled_time, sampled_events, sampled_organs
 
+    indices = np.random.choice(total, size=actual_size, replace=False)
+    sampled_features = [features_all[i] for i in indices]
+    sampled_time = time_all.iloc[indices]
+    sampled_events = events_all.iloc[indices]
+
+    return sampled_features, sampled_time, sampled_events
 
 def feature_dropout(features, dropout_rate=0.0):
     """
@@ -285,7 +263,7 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
         # -------------------------------
         # Unpack internal PDAC & do train/val split
         # -------------------------------
-        PDAC_Features, Coords_PD, Barcodes_PD, Clinical_PD, PDAC_organs = preloaded_pdac
+        PDAC_Features, Coords_PD, Barcodes_PD, Clinical_PD = preloaded_pdac
         PDAC_TIME = Clinical_PD['Time']
         PDAC_EVENT = Clinical_PD['Status']
 
@@ -296,16 +274,14 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
         internal_train_features = [PDAC_Features[i] for i in train_index]
         internal_train_time = PDAC_TIME.iloc[train_index]
         internal_train_event = PDAC_EVENT.iloc[train_index]
-        internal_train_organs   = [PDAC_organs[i]   for i in train_index]
 
         # Internal validation set
         VALID_FEATURES = [PDAC_Features[i] for i in valid_index]
         VALID_TIME = PDAC_TIME.iloc[valid_index]
         VALID_EVENT = PDAC_EVENT.iloc[valid_index]
-        VALID_ORGANS   = [PDAC_organs[i]   for i in valid_index]
 
         # NCC test set
-        NCC_Features, Coords_TEST, Barcodes_TEST, NCC_TIME, NCC_EVENT, NCC_organs = preloaded_ncc
+        NCC_Features, Coords_TEST, Barcodes_TEST, NCC_TIME, NCC_EVENT = preloaded_ncc
 
         # -------------------------------
         # Initialize model, optimizer, scheduler
@@ -349,17 +325,13 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
         TRAIN_FEATURES = internal_train_features[:]
         TRAIN_TIME = internal_train_time.copy()
         TRAIN_EVENT = internal_train_event.copy()
-        # ◀◀ build a matching list of organ IDs for the internal samples
-        TRAIN_ORGANS   = internal_train_organs[:]
 
         # Only add external data if available
         if args.ExternalDatasets and preloaded_external is not None:
-            ext_features, ext_time, ext_event, ext_organs = sample_external(preloaded_external, NUM_EXTERNAL)
+            ext_features, ext_time, ext_event = sample_external(preloaded_external, NUM_EXTERNAL)
             TRAIN_FEATURES += ext_features
             TRAIN_TIME = pd.concat([TRAIN_TIME, ext_time], axis=0)
             TRAIN_EVENT = pd.concat([TRAIN_EVENT, ext_event], axis=0)
-            # ◀◀ append their organ IDs too
-            TRAIN_ORGANS  += ext_organs
 
         print(f"Number of TRAIN_FEATURES = {len(TRAIN_FEATURES)}")
         train_idx_list = list(range(len(TRAIN_FEATURES)))
@@ -386,7 +358,8 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                 # For ACMIL branch using run_one_sample
                 if args.model_name == 'ACMIL':
                     if conf.n_class == 2:
-                        self_loss, outputs = run_one_sample(featureRandomSelection(TRAIN_FEATURES[cur_idx]), MODEL, conf, args.device)
+                        self_loss, outputs = run_one_sample(featureRandomSelection(TRAIN_FEATURES[cur_idx]),
+                                                            MODEL, conf, args.device)
                         if outputs is None:
                             continue
                         slide_pred, slide_class = outputs
@@ -395,7 +368,8 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                         batch_self_loss += self_loss
                         slide_cls.append(slide_class)
                     else:
-                        self_loss, slide_pred = run_one_sample(featureRandomSelection(TRAIN_FEATURES[cur_idx]), MODEL, conf, args.device)
+                        self_loss, slide_pred = run_one_sample(featureRandomSelection(TRAIN_FEATURES[cur_idx]),
+                                                               MODEL, conf, args.device)
                         if slide_pred is None:
                             continue
                         if not isinstance(self_loss, torch.Tensor):
@@ -403,13 +377,11 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                         batch_self_loss += self_loss
                 else:
                     Feature_ = torch.from_numpy(featureRandomSelection(TRAIN_FEATURES[cur_idx])).unsqueeze(0).float().to(args.device)
-                    # select its organ id:
-                    org_id = torch.tensor([TRAIN_ORGANS[cur_idx]], dtype=torch.long, device=args.device)
                     if conf.n_class == 2:
-                        slide_pred, slide_class = MODEL(Feature_, org_id)
+                        slide_pred, slide_class = MODEL(Feature_)
                         slide_cls.append(slide_class)
                     else:
-                        slide_pred = MODEL(Feature_, org_id)
+                        slide_pred = MODEL(Feature_)
                 # Ensure slide_pred is a tensor (if it is a tuple, extract the first element)
                 if isinstance(slide_pred, (tuple, list)):
                     slide_pred = slide_pred[0]
@@ -479,14 +451,11 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                     else:
                         _, slide_pred = run_one_sample(VALID_FEATURES[idx_], MODEL, conf, args.device)
                 else:
-                    # pull in the per‐slide organ index
-                    feat_     = torch.from_numpy(featureRandomSelection(VALID_FEATURES[idx_])).unsqueeze(0).float().to(args.device)
-                    organ_id  = torch.tensor([VALID_ORGANS[idx_]], dtype=torch.long).to(args.device)      # using defined VALID_ORGANS list
-
+                    feat_ = torch.from_numpy(featureRandomSelection(VALID_FEATURES[idx_])).unsqueeze(0).float().to(args.device)
                     if conf.n_class == 2:
-                        slide_pred, _ = MODEL(feat_, organ_idx=organ_id)
+                        slide_pred, _ = MODEL(feat_)
                     else:
-                        slide_pred     = MODEL(feat_, organ_idx=organ_id)
+                        slide_pred = MODEL(feat_)
                 if isinstance(slide_pred, (tuple,list)):
                     slide_pred = slide_pred[0]
                 val_slide_preds.append(-slide_pred.item())
@@ -511,16 +480,11 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                     else:
                         _, slide_pred = run_one_sample(NCC_Features[idx_], MODEL, conf, args.device)
                 else:
-                    # get your slide features
                     feat_ = torch.from_numpy(featureRandomSelection(NCC_Features[idx_])).unsqueeze(0).float().to(args.device)
-                    # lookup its organ‐ID and make a tensor of shape [1]
-                    org_id = torch.tensor([NCC_organs[idx_]], dtype=torch.long, device=args.device)
-                    # now pass both features and organ to your forward()
                     if conf.n_class == 2:
-                        slide_pred, _ = MODEL(feat_, org_id)
+                        slide_pred, _ = MODEL(feat_)
                     else:
-                        slide_pred = MODEL(feat_, org_id)
-
+                        slide_pred = MODEL(feat_)
                 if isinstance(slide_pred, (tuple,list)):
                     slide_pred = slide_pred[0]
                 ncc_preds.append(-slide_pred.item())
@@ -550,22 +514,17 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
 
     for Epoch in range(1, args.Epoch):
         MODEL.train()
-
-        # 1) start with your internal data (no re‑indexing!)
         TRAIN_FEATURES = internal_train_features[:]
-        TRAIN_TIME     = internal_train_time.copy()
-        TRAIN_EVENT    = internal_train_event.copy()
-        TRAIN_ORGANS   = internal_train_organs[:]
+        TRAIN_TIME = internal_train_time.copy()
+        TRAIN_EVENT = internal_train_event.copy()
 
-        # 2) optionally append external data
         if args.ExternalDatasets and preloaded_external is not None:
-            ext_features, ext_time, ext_event, ext_organs = sample_external(preloaded_external, NUM_EXTERNAL)
+            ext_features, ext_time, ext_event = sample_external(preloaded_external, NUM_EXTERNAL)
             TRAIN_FEATURES += ext_features
-            TRAIN_TIME     = pd.concat([TRAIN_TIME,  ext_time],  axis=0)
-            TRAIN_EVENT    = pd.concat([TRAIN_EVENT, ext_event], axis=0)
-            TRAIN_ORGANS  += ext_organs
+            TRAIN_TIME = pd.concat([TRAIN_TIME, ext_time], axis=0)
+            TRAIN_EVENT = pd.concat([TRAIN_EVENT, ext_event], axis=0)
 
-        print(f"Number of TRAIN_FEATURES = {len(TRAIN_FEATURES)}, orgs = {len(TRAIN_ORGANS)}")
+        print(f"Number of TRAIN_FEATURES = {len(TRAIN_FEATURES)}")
         train_idx_list = list(range(len(TRAIN_FEATURES)))
         random.shuffle(train_idx_list)
 
@@ -606,21 +565,13 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                             self_loss = torch.tensor(self_loss, device=args.device)
                         batch_self_loss += self_loss
                 else:
-
-                     feat_ = torch.from_numpy(featureRandomSelection(TRAIN_FEATURES[cur_idx])).unsqueeze(0).float().to(args.device)
-                     feat_ = feature_dropout(feat_, dropout_rate=DROPOUT_RATE)
- 
-                     # look up the matching organ‐ID for this sample
-                     org_id = torch.tensor([TRAIN_ORGANS[cur_idx]], dtype=torch.long, device=args.device)
- 
-                     # forward both patch features and organ embedding
-                     if conf.n_class == 2:
-                         slide_pred, slide_class = MODEL(feat_, org_id)
-                         slide_cls.append(slide_class)
-                     else:
-                         slide_pred = MODEL(feat_, org_id)
-
-
+                    feat_ = torch.from_numpy(featureRandomSelection(TRAIN_FEATURES[cur_idx])).unsqueeze(0).float().to(args.device)
+                    feat_ = feature_dropout(feat_, dropout_rate=DROPOUT_RATE)
+                    if conf.n_class == 2:
+                        slide_pred, slide_class = MODEL(feat_)
+                        slide_cls.append(slide_class)
+                    else:
+                        slide_pred = MODEL(feat_)
                 if isinstance(slide_pred, (tuple,list)):
                     slide_pred = slide_pred[0]
                 slide_preds.append(slide_pred)
@@ -681,16 +632,11 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                     else:
                         _, slide_pred = run_one_sample(NCC_Features[idx_], MODEL, conf, args.device)
                 else:
-                    feat_ = torch.from_numpy(featureRandomSelection(NCC_Features[idx_])) \
-                            .unsqueeze(0) \
-                            .float() \
-                            .to(args.device)
-                    org_id = torch.tensor([NCC_organs[idx_]], dtype=torch.long, device=args.device)
-
+                    feat_ = torch.from_numpy(featureRandomSelection(NCC_Features[idx_])).unsqueeze(0).float().to(args.device)
                     if conf.n_class == 2:
-                        slide_pred, _ = MODEL(feat_, org_id)
+                        slide_pred, _ = MODEL(feat_)
                     else:
-                        slide_pred = MODEL(feat_, org_id)
+                        slide_pred = MODEL(feat_)
                 if isinstance(slide_pred, (tuple,list)):
                     slide_pred = slide_pred[0]
                 ncc_preds.append(-slide_pred.item())
@@ -736,17 +682,11 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
                     else:
                         _, slide_pred = run_one_sample(VALID_FEATURES[idx_], MODEL, conf, args.device)
                 else:
-                    feat_ = torch.from_numpy(featureRandomSelection(VALID_FEATURES[idx_])) \
-                            .unsqueeze(0) \
-                            .float() \
-                            .to(args.device)
-                    org_id = torch.tensor([VALID_ORGANS[idx_]], dtype=torch.long, device=args.device)
-
+                    feat_ = torch.from_numpy(featureRandomSelection(VALID_FEATURES[idx_])).unsqueeze(0).float().to(args.device)
                     if conf.n_class == 2:
-                        slide_pred, _ = MODEL(feat_, org_id)
+                        slide_pred, _ = MODEL(feat_)
                     else:
-                        slide_pred = MODEL(feat_, org_id)
-
+                        slide_pred = MODEL(feat_)
                 if isinstance(slide_pred, (tuple,list)):
                     slide_pred = slide_pred[0]
                 val_slide_preds.append(-slide_pred.item())
@@ -828,7 +768,6 @@ if __name__ == '__main__':
 
     preloaded_pdac = getDataTCGA_PDAC(args)
     preloaded_ncc = getData(args)
-    
     if args.ExternalDatasets:
         preloaded_external = getDataTCGA_All(args, cancer_types=args.ExternalDatasets)
     else:
