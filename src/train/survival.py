@@ -60,7 +60,7 @@ DROPOUT_RATE = 0.0
 
 # ---------------- Global Hyperparameters ----------------
 # Define n_class hyperparameter (set to 1 for survival only, or 2 for survival + classification)
-N_CLASS = 2
+N_CLASS = 1
 
 BATCH_SELF_LOSS_WEIGHT = 0.05
 if N_CLASS == 1:
@@ -76,6 +76,8 @@ SURV_LOSS_WEIGHT = 1 - BATCH_SELF_LOSS_WEIGHT - CLS_LOSS_WEIGHT
 #############################################
 # Data Loading Functions (unchanged)
 #############################################
+
+# Load NCC/PDAC data
 def getData(args):
     clinical_file = DATA_DIR / 'clinical' / "clinical.txt"
     Clinical = pd.read_csv(clinical_file, sep="\t")
@@ -100,6 +102,7 @@ def getData(args):
     Time, Event = Clinical['PFS_mo'], Clinical['PFS_event_Up220713']
     return Features, Coords, Barcodes, Time, Event
 
+# Load TCGA/External data
 def getDataTCGA_All(args, cancer_types=['LIHC', 'CHOL', 'LUAD', 'COAD', 'ESCA', 'BRCA']):
     Clinical = pd.read_csv(DATA_DIR / 'clinical' / "TCGA_clinical_data.tsv", sep="\t")
     Clinical.set_index('case_submitter_id', inplace=True)
@@ -128,6 +131,7 @@ def getDataTCGA_All(args, cancer_types=['LIHC', 'CHOL', 'LUAD', 'COAD', 'ESCA', 
         Barcodes_out.append(curBarcode)
     return Features, Coords, Barcodes_out, Clinical['time'], (Clinical['status'] == "Dead").astype(int)
 
+# Load TCGA/PDAC data
 def getDataTCGA_PDAC(args):
     TCGA_path = FEATURES_DIR / "Features_TCGA"
     TCGA_Path_Coord = TCGA_path / f"Coord_{args.Backbone}"
@@ -737,51 +741,50 @@ def train_model(args, configs, preloaded_pdac, preloaded_external, preloaded_ncc
 
     print(f"\nTraining complete. Best test c-index={best_test_cindex:.3f} at epoch {best_epoch} (initial attempt(s) needed={reinit_attempts}).")
 
-#############################################
-# Main Entry Point
-#############################################
-if __name__ == '__main__':
+def build_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--Backbone', type=str, default='UNI')
-    parser.add_argument('--cuda_divce', type=int, default=0)
-    parser.add_argument('--models', type=str, default='ACMIL',
+    parser.add_argument('--Backbone',     type=str, default='UNI')
+    parser.add_argument('--cuda_divce',   type=int, default=0)
+    parser.add_argument('--models',       type=str, default='ACMIL',
                         help="Comma-separated list of model names (e.g., 'ACMIL,TransMIL')")
-    parser.add_argument('--losses', type=str, default='coxph',
-                        help="Comma-separated list of loss names. For combined loss experiments, provide two (e.g., 'coxph,rank')")
-    parser.add_argument('--num_loss', type=int, default=1,
+    parser.add_argument('--losses',       type=str, default='coxph',
+                        help="Comma-separated list of loss names. For combined‐loss experiments, provide two (e.g., 'coxph,rank')")
+    parser.add_argument('--num_loss',     type=int, default=1,
                         help="Number of loss functions to use: 1 or 2.")
-    parser.add_argument('--loss_weight', type=str, default="1.0",
+    parser.add_argument('--loss_weight',  type=str, default="1.0",
                         help="Comma-separated list of weights for combined loss (e.g., '0.0,0.25,0.5,0.75,1.0').")
-    parser.add_argument('--Epoch', type=int, default=100)
-    parser.add_argument('--learning_rate', type=str, default="1e-4",
+    parser.add_argument('--Epoch',        type=int, default=100)
+    parser.add_argument('--learning_rate',type=str, default="1e-4",
                         help="Comma-separated list of learning rates (e.g., '1e-6,2e-6,5e-6,1e-5')")
     parser.add_argument('--ExternalDatasets', nargs='+', type=str, default=[])
-    parser.add_argument('--repeat', type=int, default=0,
+    parser.add_argument('--repeat',       type=int, default=0,
                         help="Manually specify a repeat number to append to output filenames.")
+    return parser
 
-    args = parser.parse_args()
-    args.device = torch.device(f"cuda:{args.cuda_divce}" if torch.cuda.is_available() else "cpu")
 
+def run_experiment(args):
+    # mirror your existing __main__ body here:
+    args.device = torch.device(f"cuda:{args.cuda_divce}"
+                               if torch.cuda.is_available() else "cpu")
     args.models = [m.strip() for m in args.models.split(',')]
-    args.loss = args.losses
     learning_rates = [float(x) for x in args.learning_rate.split(',')]
 
     preloaded_pdac = getDataTCGA_PDAC(args)
-    preloaded_ncc = getData(args)
-    if args.ExternalDatasets:
-        preloaded_external = getDataTCGA_All(args, cancer_types=args.ExternalDatasets)
-    else:
-        preloaded_external = None
+    preloaded_ncc  = getData(args)
+    preloaded_ext  = ( getDataTCGA_All(args, cancer_types=args.ExternalDatasets)
+                      if args.ExternalDatasets else None )
 
     for model_name in args.models:
-        for loss_str in [l.strip() for l in args.loss.split(',')]:
+        for loss_str in [l.strip() for l in args.losses.split(',')]:
             for lr in learning_rates:
                 args.model_name = model_name
-                args.loss = loss_str
+                args.loss       = loss_str
                 args.current_lr = lr
-                print(f"\nTraining with Model: {model_name}, Loss: {loss_str}, Learning Rate: {lr:.2e}, n_class: {N_CLASS}")
+
+                print(f"\nTraining with Model: {model_name}, "
+                      f"Loss: {loss_str}, LR: {lr:.2e}")
                 train_model(
-                    args, 
+                    args,
                     configs={
                         'STAD': {'stride': 224, 'patch_size': 224, 'batch_size': 32, 'downsample': 1},
                         'TCGA': {'stride': 448, 'patch_size': 448, 'batch_size': 32, 'downsample': 2},
@@ -789,6 +792,20 @@ if __name__ == '__main__':
                         'feature_dim': 1024,
                     },
                     preloaded_pdac=preloaded_pdac,
-                    preloaded_external=preloaded_external,
+                    preloaded_external=preloaded_ext,
                     preloaded_ncc=preloaded_ncc
                 )
+
+
+def main(argv=None):
+    parser = build_parser()
+    # use parse_known_args if you want to ignore Jupyter flags, or parse_args(argv)
+    if argv is None:
+        args, _ = parser.parse_known_args()
+    else:
+        args = parser.parse_args(argv)
+    run_experiment(args)
+
+
+if __name__ == '__main__':
+    main()
