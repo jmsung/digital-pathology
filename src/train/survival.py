@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import io
 from lifelines import KaplanMeierFitter
 from lifelines.utils import concordance_index
 import matplotlib.pyplot as plt
@@ -185,7 +186,7 @@ def get_data_pdac_test(backbone_name: str, data_dir: Path, features_dir: Path) -
     # Rename for consistency, keep times RAW
     clinical_df_filtered = clinical_df_filtered.rename(columns={'PFS_mo': 'Time_Raw', 'PFS_event_Up220713': 'Status'})
     # For test set evaluation, 'Time' should be the raw time.
-    clinical_df_filtered['Time'] = clinical_df_filtered['Time_Raw']
+    clinical_df_filtered['Time'] = clinical_df_filtered['Time_Raw'] * (365/12) # convert months to days
     
     # Ensure 'Status' is mapped if it's string
     if clinical_df_filtered['Status'].dtype == 'object':
@@ -296,32 +297,51 @@ def get_data_tcga_all_external(backbone_name: str, cancer_types: List[str], data
     valid_case_ids_from_files = list(set(fn_stem[:12] for fn_stem in actual_filenames_to_load))
     clinical_df_filtered = clinical_df_subset.loc[clinical_df_subset.index.isin(valid_case_ids_from_files)].copy()
 
-
     for filename_stem in tqdm(actual_filenames_to_load, desc="Loading External TCGA features"):
         case_id = filename_stem[:12]
-        if case_id not in clinical_df_filtered.index: # Should not happen if actual_filenames_to_load is correct
+        if case_id not in clinical_df_filtered.index:
+            logger.warning(f"Case ID {case_id} not in clinical_df_filtered index, skipping...")
             continue
+
         try:
-            with open(tcga_feature_path / f"{filename_stem}.pickle", 'rb') as f: feature = pickle.load(f)
-            with open(tcga_coord_path / f"{filename_stem}.pickle", 'rb') as f: coord = pickle.load(f)
-            
+            # Load feature safely
+            feature_path = tcga_feature_path / f"{filename_stem}.pickle"
+            with open(feature_path, 'rb') as f:
+                feature_bytes = f.read()
+                feature = pickle.load(io.BytesIO(feature_bytes))
+
+            # Load coord safely
+            coord_path = tcga_coord_path / f"{filename_stem}.pickle"
+            with open(coord_path, 'rb') as f:
+                coord_bytes = f.read()
+                coord = pickle.load(io.BytesIO(coord_bytes))
+
+            # Append features
             all_features_list.append(feature)
             all_coords_list.append(np.array(coord))
-            all_barcodes_list.append(filename_stem) # Store full filename stem
-            
-            # Get clinical info for this specific case_id (which is filename_stem[:12])
-            # and append the cancer_type from clinical_df_filtered
-            clinical_row = clinical_df_filtered.loc[case_id].copy() # Get the series for this case_id
+            all_barcodes_list.append(filename_stem)
+
+            # Clinical info
+            clinical_row = clinical_df_filtered.loc[case_id].copy()
             current_clinical_info = {
                 'Time_Raw': clinical_row['time'],
                 'Status': 1 if clinical_row['status'] == "Dead" else (0 if clinical_row['status'] == "Alive" else pd.NA),
                 'cancer_type': clinical_row['cancer_type'],
-                'original_barcode': filename_stem # Keep track of which file it came from
+                'original_barcode': filename_stem
             }
             all_clinical_data_list.append(current_clinical_info)
 
-        except FileNotFoundError: logger.warning(f"External TCGA: File not found for {filename_stem}"); continue
-        except Exception as e: logger.error(f"Error loading External TCGA {filename_stem}: {e}"); continue
+        except FileNotFoundError:
+            logger.warning(f"External TCGA: File not found for {filename_stem}")
+            continue
+
+        except SystemError as se:
+            logger.error(f"SystemError loading {filename_stem}: {se}")
+            continue
+
+        except Exception as e:
+            logger.error(f"Unexpected error loading {filename_stem}: {e}")
+            continue
     
     if not all_clinical_data_list:
         return [], [], [], pd.DataFrame()
@@ -434,30 +454,45 @@ def apply_feature_dropout(features: torch.Tensor, dropout_rate: float) -> torch.
 
 def sample_external_data(
     preloaded_external: Tuple[List, List, List, pd.DataFrame], 
-    sample_size: int # This is TARGET_EXT_SAMPLES (e.g., 160)
+    sample_size: int
 ) -> Tuple[List, pd.DataFrame]:
-    features_all, _, _, clinical_df_all = preloaded_external
-    total_unique_samples = len(features_all) 
+    features_all, _, barcodes_all, clinical_df_all = preloaded_external
     
-    # Current logic:
-    # actual_size_to_sample = min(sample_size, total_unique_samples)
-    # indices = np.random.choice(total_unique_samples, size=actual_size_to_sample, replace=False)
-    
-    # Proposed change:
-    if total_unique_samples == 0:
+    total_unique_samples = len(features_all)
+
+    if total_unique_samples == 0 or clinical_df_all.empty:
+        logger.warning("[sample_external_data] No external features or clinical data available.")
         return [], pd.DataFrame(columns=clinical_df_all.columns)
 
-    if total_unique_samples < sample_size: # External dataset is smaller than target
-        # Sample WITH replacement (oversample)
-        indices = np.random.choice(total_unique_samples, size=sample_size, replace=True)
-    else: # External dataset is large enough
-        # Sample WITHOUT replacement (subsample or take all if equal)
-        indices = np.random.choice(total_unique_samples, size=sample_size, replace=False)
-            
-    sampled_features = [features_all[i] for i in indices]
-    sampled_clinical_df = clinical_df_all.iloc[indices].copy() 
+    # Check if features and clinical data are aligned
+    if len(barcodes_all) != total_unique_samples:
+        raise ValueError("Mismatch: features_all and barcodes_all lengths are different.")
     
+    # Ensure barcodes exist in clinical_df_all index
+    barcodes_all = [b for b in barcodes_all if b[:12] in clinical_df_all.index]
+    features_all = [f for b, f in zip(barcodes_all, features_all) if b[:12] in clinical_df_all.index]
+
+    total_valid_samples = len(features_all)
+
+    if total_valid_samples == 0:
+        logger.warning("[sample_external_data] All barcodes filtered out due to missing clinical info.")
+        return [], pd.DataFrame(columns=clinical_df_all.columns)
+
+    if total_valid_samples < sample_size:
+        indices = np.random.choice(total_valid_samples, size=sample_size, replace=True)
+    else:
+        indices = np.random.choice(total_valid_samples, size=sample_size, replace=False)
+
+    sampled_features = [features_all[i] for i in indices]
+    sampled_barcodes = [barcodes_all[i] for i in indices]
+
+    # Use barcodes[:12] (TCGA IDs) to fetch clinical info safely
+    sample_ids = [b[:12] for b in sampled_barcodes]
+    sampled_clinical_df = clinical_df_all.loc[sample_ids].copy()
+    sampled_clinical_df.index = sampled_barcodes  # Keep full barcode as index if needed
+
     return sampled_features, sampled_clinical_df
+
 
 
 def select_loss_functions(loss_arg: str, device: torch.device) -> Tuple[List[Callable], str, List[str]]:
