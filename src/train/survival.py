@@ -87,7 +87,7 @@ class TrainingParams:
     CINDEX_MIN_EPOCH0: float = 0.5
     MAX_REINIT_ATTEMPTS: int = 100
     EARLY_STOPPING_PATIENCE: int = 50
-    NUM_EXTERNAL_SAMPLES: int = 80
+    NUM_EXTERNAL_SAMPLES: int = 150
     FEATURE_DROPOUT_RATE: float = 0.0
     FEATURE_DIM: int = 1024
     EVENT_MAPPING: Dict[str, int] = field(default_factory=lambda: {'Alive': 0, 'Dead': 1})
@@ -252,99 +252,107 @@ def get_data_tcga_all_external(backbone_name: str, cancer_types: List[str], data
     logger.info(f"Loading External TCGA data for backbone: {backbone_name}, types: {cancer_types} - applying percentile rank normalization per type.")
     clinical_df_full = pd.read_csv(data_dir / 'clinical' / "TCGA_clinical_data.tsv", sep="\t")
     clinical_df_full.set_index('case_submitter_id', inplace=True)
-    
+
     tcga_all_path = features_dir / "Features_AllTypes"
     tcga_coord_path = tcga_all_path / f"Coord_{backbone_name}"
     tcga_feature_path = tcga_all_path / f"Feature_{backbone_name}"
-    
-    all_features_list, all_coords_list, all_barcodes_list = [], [], []
-    all_clinical_data_list = []
 
-    # Filter clinical data first by requested cancer types
-    clinical_df_subset = clinical_df_full[clinical_df_full['cancer_type'].isin(cancer_types)].copy() # Use .copy() to avoid SettingWithCopyWarning
+    # These lists will store initially loaded data
+    initial_features_list, initial_coords_list, initial_barcodes_list = [], [], []
+    initial_clinical_data_list = [] # Stores dicts for clinical info
+
+    clinical_df_subset = clinical_df_full[clinical_df_full['cancer_type'].isin(cancer_types)].copy()
     if clinical_df_subset.empty:
         logger.warning(f"No clinical data found for specified cancer types: {cancer_types}")
         return [], [], [], pd.DataFrame()
 
-    # Get available feature files (stems)
     filenames_in_coord_dir = {p.stem for p in tcga_coord_path.iterdir() if p.suffix == ".pickle"}
-    
-    # Filter clinical_df_subset to include only cases for which feature files likely exist
-    # This logic assumes filename stems in coord_dir might be directly case_submitter_id or start with it
-    # Original logic: barcodes_from_filenames = [fn[:12] for fn in filenames_in_coord_dir if fn[:12] in clinical_df.index]
-    # Let's simplify: we iterate through clinical_df_subset and try to load corresponding files.
-    # A robust way would be to map actual filenames to case_submitter_id.
-    # Assuming filename stems in coord_dir are what we try to load.
-    
-    case_ids_with_features_to_load = []
-    for case_id in clinical_df_subset.index:
-        # Attempt to find a filename that matches this case_id. This is a simplification.
-        # The original code used: filtered_filenames = [fn for fn in filenames_in_coord_dir if fn[:12] in clinical_df.index]
-        # This implies a mapping: filename_stem[:12] == case_id
-        # Let's find all filename_stems that could correspond to this case_id
-        
-        # Using a direct approach if filename stem IS the case_id, or if it's more complex, this part needs exact logic.
-        # For now, let's assume we have a list of actual filenames (stems) to load
-        # and then we'll map them back to clinical data.
-        # The original logic for filtering filenames:
-        potential_filenames_for_case = [fn_stem for fn_stem in filenames_in_coord_dir if fn_stem.startswith(case_id)]
-        # This might get multiple slides for one case. For simplicity, taking first or assuming one.
-        # This part is tricky without exact knowledge of filename conventions vs case_id.
-        # Let's stick to the previous structure: iterate through available filenames and match to clinical.
-
     actual_filenames_to_load = [fn_stem for fn_stem in filenames_in_coord_dir if fn_stem[:12] in clinical_df_subset.index]
-    # Re-filter clinical_df_subset to only these valid case_ids derived from filenames
+    
     valid_case_ids_from_files = list(set(fn_stem[:12] for fn_stem in actual_filenames_to_load))
-    clinical_df_filtered = clinical_df_subset.loc[clinical_df_subset.index.isin(valid_case_ids_from_files)].copy()
+    # Filter clinical_df_subset to only these valid case_ids
+    clinical_df_filtered_for_loading = clinical_df_subset.loc[clinical_df_subset.index.isin(valid_case_ids_from_files)].copy()
 
     for filename_stem in tqdm(actual_filenames_to_load, desc="Loading External TCGA features"):
         case_id = filename_stem[:12]
-        if case_id not in clinical_df_filtered.index:
-            logger.warning(f"Case ID {case_id} not in clinical_df_filtered index, skipping...")
+        if case_id not in clinical_df_filtered_for_loading.index:
+            # This should ideally not happen if actual_filenames_to_load is derived correctly
+            logger.warning(f"Case ID {case_id} (from {filename_stem}) not in clinical_df_filtered_for_loading, skipping...")
             continue
-
         try:
-            # Load feature safely
             feature_path = tcga_feature_path / f"{filename_stem}.pickle"
-            with open(feature_path, 'rb') as f:
-                feature_bytes = f.read()
-                feature = pickle.load(io.BytesIO(feature_bytes))
-
-            # Load coord safely
+            with open(feature_path, 'rb') as f: feature = pickle.load(io.BytesIO(f.read()))
             coord_path = tcga_coord_path / f"{filename_stem}.pickle"
-            with open(coord_path, 'rb') as f:
-                coord_bytes = f.read()
-                coord = pickle.load(io.BytesIO(coord_bytes))
+            with open(coord_path, 'rb') as f: coord = pickle.load(io.BytesIO(f.read()))
 
-            # Append features
-            all_features_list.append(feature)
-            all_coords_list.append(np.array(coord))
-            all_barcodes_list.append(filename_stem)
+            initial_features_list.append(feature)
+            initial_coords_list.append(np.array(coord))
+            initial_barcodes_list.append(filename_stem) # Full filename stem
 
-            # Clinical info
-            clinical_row = clinical_df_filtered.loc[case_id].copy()
+            clinical_row = clinical_df_filtered_for_loading.loc[case_id].copy()
             current_clinical_info = {
                 'Time_Raw': clinical_row['time'],
                 'Status': 1 if clinical_row['status'] == "Dead" else (0 if clinical_row['status'] == "Alive" else pd.NA),
                 'cancer_type': clinical_row['cancer_type'],
-                'original_barcode': filename_stem
+                'original_barcode': filename_stem # Store the full barcode for later alignment
             }
-            all_clinical_data_list.append(current_clinical_info)
-
+            initial_clinical_data_list.append(current_clinical_info)
         except FileNotFoundError:
             logger.warning(f"External TCGA: File not found for {filename_stem}")
             continue
-
-        except SystemError as se:
+        except SystemError as se: # Keep existing error handling
             logger.error(f"SystemError loading {filename_stem}: {se}")
             continue
-
         except Exception as e:
             logger.error(f"Unexpected error loading {filename_stem}: {e}")
             continue
-    
-    if not all_clinical_data_list:
+
+    if not initial_clinical_data_list: # No data was successfully loaded
+        logger.info("[get_data_tcga_all_external] No features loaded or no corresponding clinical data gathered.")
         return [], [], [], pd.DataFrame()
+
+    # Create a temporary DataFrame from all successfully loaded clinical entries
+    temp_df = pd.DataFrame(initial_clinical_data_list)
+    # Add an index column that refers to the original position in initial_features_list etc.
+    temp_df['original_list_idx'] = range(len(initial_barcodes_list))
+
+    # Convert Status to numeric and drop rows with missing Time_Raw or Status
+    temp_df['Status'] = pd.to_numeric(temp_df['Status'], errors='coerce')
+    final_clinical_df = temp_df.dropna(subset=['Time_Raw', 'Status']).copy()
+
+    if final_clinical_df.empty:
+        logger.warning("[get_data_tcga_all_external] All loaded external samples filtered out due to missing Time_Raw or Status.")
+        return [], [], [], pd.DataFrame()
+
+    # Get the original indices of the rows that survived the dropna
+    surviving_original_indices = final_clinical_df['original_list_idx'].tolist()
+
+    # Filter the feature, coord, and barcode lists using these surviving indices
+    surviving_features = [initial_features_list[i] for i in surviving_original_indices]
+    surviving_coords = [initial_coords_list[i] for i in surviving_original_indices]
+    surviving_barcodes = [initial_barcodes_list[i] for i in surviving_original_indices]
+
+    # Clean up final_clinical_df: remove helper column and reset index
+    final_clinical_df.drop(columns=['original_list_idx'], inplace=True)
+    final_clinical_df.reset_index(drop=True, inplace=True)
+    
+    # At this point, final_clinical_df.iloc[j] corresponds to surviving_barcodes[j],
+    # surviving_features[j], and surviving_coords[j].
+    # The column final_clinical_df['original_barcode'] should also match surviving_barcodes.
+
+    # Apply percentile rank normalization
+    if not final_clinical_df.empty: # Check again, though earlier check should cover
+        final_clinical_df['Time_PercentileRank'] = final_clinical_df.groupby('cancer_type')['Time_Raw'].transform(calculate_percentile_ranks)
+        final_clinical_df['Time'] = final_clinical_df['Time_PercentileRank']
+    else: # Should ideally not be reached if checks above are comprehensive
+        final_clinical_df['Time_PercentileRank'] = pd.Series(dtype='float64')
+        final_clinical_df['Time'] = pd.Series(dtype='float64')
+    
+    # Ensure all required columns are present for downstream use
+    expected_cols = ['Time', 'Status', 'Time_Raw', 'Time_PercentileRank', 'cancer_type', 'original_barcode']
+    # final_clinical_df should already have these from its construction and processing.
+
+    return surviving_features, surviving_coords, surviving_barcodes, final_clinical_df
 
     # Combine all loaded clinical data into a single DataFrame
     combined_clinical_df = pd.DataFrame(all_clinical_data_list)
@@ -359,7 +367,6 @@ def get_data_tcga_all_external(backbone_name: str, cancer_types: List[str], data
     else: # Handle case where dataframe might become empty after dropna
         combined_clinical_df['Time_PercentileRank'] = pd.Series(dtype='float64')
         combined_clinical_df['Time'] = pd.Series(dtype='float64')
-
 
     # Reorder features, coords, barcodes to match the combined_clinical_df order if necessary.
     # This assumes the order of appending to all_features_list etc. matches the order in combined_clinical_df
@@ -453,43 +460,50 @@ def apply_feature_dropout(features: torch.Tensor, dropout_rate: float) -> torch.
 
 
 def sample_external_data(
-    preloaded_external: Tuple[List, List, List, pd.DataFrame], 
+    preloaded_external: Tuple[List, List, List, pd.DataFrame],
     sample_size: int
 ) -> Tuple[List, pd.DataFrame]:
     features_all, _, barcodes_all, clinical_df_all = preloaded_external
-    
-    total_unique_samples = len(features_all)
+    # Due to changes in get_data_tcga_all_external, features_all, barcodes_all,
+    # and clinical_df_all (row-wise) are now synchronized and pre-filtered.
+    # clinical_df_all.iloc[i] corresponds to barcodes_all[i] and features_all[i].
+    # clinical_df_all has a RangeIndex.
 
-    if total_unique_samples == 0 or clinical_df_all.empty:
-        logger.warning("[sample_external_data] No external features or clinical data available.")
-        return [], pd.DataFrame(columns=clinical_df_all.columns)
+    # 1) Quick exit if no data (already pre-filtered by loader)
+    if not features_all or clinical_df_all.empty:
+        # This log might still be useful if the loader itself returned empty lists/df
+        logger.info("[sample_external_data] No external features or clinical data available (loader returned empty).")
+        return [], pd.DataFrame(columns=clinical_df_all.columns if not clinical_df_all.empty else None)
 
-    # Check if features and clinical data are aligned
-    if len(barcodes_all) != total_unique_samples:
-        raise ValueError("Mismatch: features_all and barcodes_all lengths are different.")
-    
-    # Ensure barcodes exist in clinical_df_all index
-    barcodes_all = [b for b in barcodes_all if b[:12] in clinical_df_all.index]
-    features_all = [f for b, f in zip(barcodes_all, features_all) if b[:12] in clinical_df_all.index]
+    # 2) The problematic filtering block is removed.
+    #    features_all and barcodes_all are already the "valid" ones.
+    #    The warning "[sample_external_data] All barcodes filtered out..." should no longer occur from here.
 
-    total_valid_samples = len(features_all)
+    total_valid_samples = len(features_all) # This is the number of synchronized, valid samples
 
-    if total_valid_samples == 0:
-        logger.warning("[sample_external_data] All barcodes filtered out due to missing clinical info.")
-        return [], pd.DataFrame(columns=clinical_df_all.columns)
+    # 3) Draw indices for sampling
+    if total_valid_samples == 0: # Should have been caught by the check above
+         logger.warning("[sample_external_data] Zero valid samples to sample from (this indicates an issue if not caught earlier).")
+         return [], pd.DataFrame(columns=clinical_df_all.columns)
 
     if total_valid_samples < sample_size:
-        indices = np.random.choice(total_valid_samples, size=sample_size, replace=True)
+        # Sample with replacement if fewer valid samples than requested sample_size
+        sampled_indices = np.random.choice(total_valid_samples, size=sample_size, replace=True)
     else:
-        indices = np.random.choice(total_valid_samples, size=sample_size, replace=False)
+        # Sample without replacement
+        sampled_indices = np.random.choice(total_valid_samples, size=sample_size, replace=False)
 
-    sampled_features = [features_all[i] for i in indices]
-    sampled_barcodes = [barcodes_all[i] for i in indices]
+    sampled_features = [features_all[i] for i in sampled_indices]
+    # These are the full original barcodes corresponding to the sampled features
+    sampled_original_barcodes = [barcodes_all[i] for i in sampled_indices]
 
-    # Use barcodes[:12] (TCGA IDs) to fetch clinical info safely
-    sample_ids = [b[:12] for b in sampled_barcodes]
-    sampled_clinical_df = clinical_df_all.loc[sample_ids].copy()
-    sampled_clinical_df.index = sampled_barcodes  # Keep full barcode as index if needed
+    # 4) Build the clinical DataFrame for the sampled items using iloc.
+    # clinical_df_all.iloc[i] corresponds to barcodes_all[i].
+    sampled_clinical_df = clinical_df_all.iloc[sampled_indices].copy()
+
+    # Re-assign index of the sampled_clinical_df to the full original barcodes for downstream consistency.
+    # The 'original_barcode' column in sampled_clinical_df should match sampled_original_barcodes.
+    sampled_clinical_df.index = sampled_original_barcodes
 
     return sampled_features, sampled_clinical_df
 
@@ -699,7 +713,6 @@ def evaluate_model_on_set(
                 slide_raw_times_for_df.append(raw_times_for_plotting_optional.iloc[i])
             else: # If no separate raw times provided, use time_set_for_eval for plotting too
                  slide_raw_times_for_df.append(time_set_for_eval.iloc[i])
-
 
             event_val = event_set.iloc[i]
             numeric_event = global_train_cfg.EVENT_MAPPING.get(event_val, event_val)

@@ -190,7 +190,7 @@ def main():
 
     sns.stripplot(
         data=df, x='dataset', y='c_test', order=dataset_order, 
-        jitter=0.02, palette=plot_palette_dict, alpha=0.8, size=7, ax=ax, dodge=False # Use dict palette
+        jitter=0.1, palette=plot_palette_dict, alpha=0.8, size=7, ax=ax, dodge=False # Use dict palette
     )
     sns.pointplot(
         data=df, x='dataset', y='c_test', order=dataset_order, 
