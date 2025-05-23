@@ -88,7 +88,7 @@ class TrainingParams:
     MAX_REINIT_ATTEMPTS: int = 100
     EARLY_STOPPING_PATIENCE: int = 50
     NUM_EXTERNAL_SAMPLES: int = 150
-    FEATURE_DROPOUT_RATE: float = 0.0
+    FEATURE_DROPOUT_RATE: float = 0.2
     FEATURE_DIM: int = 1024
     EVENT_MAPPING: Dict[str, int] = field(default_factory=lambda: {'Alive': 0, 'Dead': 1})
     BATCH_SELF_LOSS_WEIGHT: float = 0.05
@@ -354,26 +354,6 @@ def get_data_tcga_all_external(backbone_name: str, cancer_types: List[str], data
 
     return surviving_features, surviving_coords, surviving_barcodes, final_clinical_df
 
-    # Combine all loaded clinical data into a single DataFrame
-    combined_clinical_df = pd.DataFrame(all_clinical_data_list)
-    combined_clinical_df['Status'] = pd.to_numeric(combined_clinical_df['Status'], errors='coerce')
-    combined_clinical_df.dropna(subset=['Time_Raw', 'Status'], inplace=True) # Remove rows with missing essential data
-
-    # Now, apply percentile rank normalization grouped by 'cancer_type'
-    if not combined_clinical_df.empty:
-        combined_clinical_df['Time_PercentileRank'] = combined_clinical_df.groupby('cancer_type')['Time_Raw'].transform(calculate_percentile_ranks)
-        # 'Time' used for training will be the percentile rank
-        combined_clinical_df['Time'] = combined_clinical_df['Time_PercentileRank']
-    else: # Handle case where dataframe might become empty after dropna
-        combined_clinical_df['Time_PercentileRank'] = pd.Series(dtype='float64')
-        combined_clinical_df['Time'] = pd.Series(dtype='float64')
-
-    # Reorder features, coords, barcodes to match the combined_clinical_df order if necessary.
-    # This assumes the order of appending to all_features_list etc. matches the order in combined_clinical_df
-    # if we built combined_clinical_df by appending dicts. It should.
-
-    return all_features_list, all_coords_list, all_barcodes_list, combined_clinical_df[['Time', 'Status', 'Time_Raw', 'Time_PercentileRank', 'cancer_type', 'original_barcode']]
-
 
 # ---------------- Model Loading Function ----------------
 def get_model(
@@ -473,7 +453,7 @@ def sample_external_data(
     if not features_all or clinical_df_all.empty:
         # This log might still be useful if the loader itself returned empty lists/df
         logger.info("[sample_external_data] No external features or clinical data available (loader returned empty).")
-        return [], pd.DataFrame(columns=clinical_df_all.columns if not clinical_df_all.empty else None)
+        return [], pd.DataFrame()
 
     # 2) The problematic filtering block is removed.
     #    features_all and barcodes_all are already the "valid" ones.
@@ -484,7 +464,7 @@ def sample_external_data(
     # 3) Draw indices for sampling
     if total_valid_samples == 0: # Should have been caught by the check above
          logger.warning("[sample_external_data] Zero valid samples to sample from (this indicates an issue if not caught earlier).")
-         return [], pd.DataFrame(columns=clinical_df_all.columns)
+         return [], pd.DataFrame()
 
     if total_valid_samples < sample_size:
         # Sample with replacement if fewer valid samples than requested sample_size
@@ -729,7 +709,6 @@ def evaluate_model_on_set(
         'times_for_plot': slide_raw_times_for_df, # Used for plotting (can be same as times_for_c_index)
         'events': slide_events_list
     }).dropna(subset=['risk', 'times_for_c_index', 'events'])
-    results_df['events'] = pd.to_numeric(results_df['events'], errors='coerce').dropna()
     
     # For plotSurvival_three, it expects a 'times' column. We'll use times_for_plot.
     results_df_for_plot = results_df.rename(columns={'times_for_plot': 'times'})

@@ -34,22 +34,20 @@ loss_color_map = {'coxph': 'green', 'rank': 'blue', 'MSE': 'orange', 'SurvPLE': 
 # ABMIL_rank_lr1e-4_w1.00__Epc10_[0.123-0.456-0.789]_[0.800-0.750-0.770]_ExtABC_11.png
 # Without external dataset:
 # ABMIL_rank_lr1e-4_w1.00__Epc10_[0.123-0.456-0.789]_[0.800-0.750-0.770]_Exp_11.png
-pattern_single = re.compile(
-    r"""
+pattern_single = re.compile(r"""
     ^
-    (?P<model>ACMIL|CLAM_SB|CLAM_MB|TransMIL|DSMIL|MeanMIL|MaxMIL|ABMIL|GABMIL)
+    (?P<model>ACMIL|CLAM_SB|CLAM_MB|TransMIL|DSMIL|MeanMIL|MaxMIL|ABMIL|GABMIL)  # model
     _
-    (?P<loss>coxph|rank|MSE|SurvPLE)
-    _lr(?P<lr>[0-9.\-+eE]+)
-    _w(?P<weight>[-\d.]+)
-    __Epc(?P<epoch>\d+)
-    _\[(?P<lr_train>[-\d.]+)-(?P<lr_valid>[-\d.]+)-(?P<lr_test>[-\d.]+)\]
-    _\[(?P<c_train>[-\d.]+)-(?P<c_valid>[-\d.]+)-(?P<c_test>[-\d.]+)\]
-    _(?P<prefix>Ext(?:[A-Za-z0-9_]+)?|Exp)_(?P<repeat>\d+)
-    \.png$
-    """,
-    re.VERBOSE
-)
+    (?P<loss>coxph|rank|MSE|SurvPLE)                                            # loss
+    _lr(?P<lr>[0-9.+\-eE]+)                                                      # learning-rate
+    _w(?P<weight>[-\d.]+)                                                        # weight
+    _Epc(?P<epoch>\d+)                                                           # epoch
+    _LogRanks\[(?P<lr_train>[-\d.]+)-(?P<lr_valid>[-\d.]+)-(?P<lr_test>[-\d.]+)\] # log-rank tests
+    _CIdx\[(?P<c_train>[-\d.]+)-(?P<c_valid>[-\d.]+)-(?P<c_test>[-\d.]+)\]        # C-indices
+    _(?P<prefix>Ext(?:[A-Za-z0-9_]+)?|Exp)                                       # Ext… or Exp
+    _(?P<repeat>\d+)                                                             # repeat
+    \.png$                                                                       # png suffix
+""", re.VERBOSE)
 
 ###############################################################################
 # PARSING FUNCTION FOR SINGLE-LOSS FILES 
