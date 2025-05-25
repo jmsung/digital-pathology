@@ -82,12 +82,12 @@ class PathsConfig:
 @dataclass
 class TrainingParams:
     N_CLASS: int = 1
-    BATCH_SIZE_MIN: int = 16
-    BATCH_SIZE_MAX: int = 64
+    BATCH_SIZE: int = 16
+    NUM_SAMPLES_INT: int = 160
+    NUM_SAMPLES_EXT: int = 160
     CINDEX_MIN_EPOCH0: float = 0.5
     MAX_REINIT_ATTEMPTS: int = 100
     EARLY_STOPPING_PATIENCE: int = 50
-    NUM_EXTERNAL_SAMPLES: int = 150
     FEATURE_DROPOUT_RATE: float = 0.2
     FEATURE_DIM: int = 1024
     EVENT_MAPPING: Dict[str, int] = field(default_factory=lambda: {'Alive': 0, 'Dead': 1})
@@ -736,17 +736,27 @@ def train_and_evaluate_model(
     ncc_event_test = ncc_clinical_df_test['Status'] # Raw events
 
     selected_loss_funcs, selected_loss_name_str, selected_loss_orig_names = select_loss_functions(args.loss, args.device)
+
+    num_sample_total = train_params.NUM_SAMPLES_INT + train_params.NUM_SAMPLES_EXT if args.ExternalDatasets else train_params.NUM_SAMPLES_INT
+    batch_size_int = int(train_params.BATCH_SIZE * train_params.NUM_SAMPLES_INT / num_sample_total)
+    batch_size_ext = int(train_params.BATCH_SIZE * train_params.NUM_SAMPLES_EXT / num_sample_total) if args.ExternalDatasets else 0
+    num_batches = num_sample_total // train_params.BATCH_SIZE
     
     while not initial_success and reinit_attempts < train_params.MAX_REINIT_ATTEMPTS:
         logger.info(f"Attempt #{reinit_attempts + 1}: C-index >= {train_params.CINDEX_MIN_EPOCH0} at epoch 0")
 
-        current_random_state = random.randint(0, 99999)
-        train_idx, valid_idx = train_test_split(np.arange(len(pdac_features_all)), test_size=0.2, random_state=current_random_state)
+        # pick exactly NUM_INTERNAL_SAMPLES unique training cases
+        all_idx = np.arange(len(pdac_features_all))        
+        n_int = min(len(all_idx), train_params.NUM_SAMPLES_INT)
 
+        current_random_state = random.randint(0, 99999)
+        rs = np.random.RandomState(current_random_state)
+        train_idx = rs.choice(all_idx, size=n_int, replace=False)
         internal_train_features = [pdac_features_all[i] for i in train_idx]
-        # Use Time_PercentileRank for training target, Time_Raw for reference/plotting if needed
         internal_train_clinical_df = pdac_clinical_df_all.iloc[train_idx]
 
+        # everyone else is validation
+        valid_idx = np.setdiff1d(all_idx, train_idx)
         valid_features = [pdac_features_all[i] for i in valid_idx]
         internal_valid_clinical_df = pdac_clinical_df_all.iloc[valid_idx]
 
@@ -766,7 +776,7 @@ def train_and_evaluate_model(
         current_train_clinical_dfs_list_epoch0 = [internal_train_clinical_df.copy()]
 
         if args.ExternalDatasets and preloaded_external_data:
-            ext_feat, ext_clinical_df_sampled = sample_external_data(preloaded_external_data, train_params.NUM_EXTERNAL_SAMPLES)
+            ext_feat, ext_clinical_df_sampled = sample_external_data(preloaded_external_data, train_params.NUM_SAMPLES_EXT)
             if not ext_clinical_df_sampled.empty:
                 current_train_features_epoch0.extend(ext_feat)
                 current_train_clinical_dfs_list_epoch0.append(ext_clinical_df_sampled)
@@ -779,26 +789,28 @@ def train_and_evaluate_model(
         current_train_time_raw_epoch0 = combined_train_clinical_df_epoch0['Time_Raw']
 
         logger.info(f"Epoch {epoch}: Total training samples = {len(current_train_features_epoch0)}")
-        train_data_indices_shuffled = list(range(len(current_train_features_epoch0)))
-        random.shuffle(train_data_indices_shuffled)
 
+        int_data_indices_shuffled = list(range(train_params.NUM_SAMPLES_INT))
+        random.shuffle(int_data_indices_shuffled)
+        ext_data_indices_shuffled = list(range(train_params.NUM_SAMPLES_INT, num_sample_total))
+        random.shuffle(ext_data_indices_shuffled)
+        
         epoch_loss_sum = 0.0; num_batches_epoch0 = 0
         epoch0_train_preds_all, epoch0_train_times_processed_all, epoch0_train_events_all = [], [], []
         # Store raw times from training set of epoch0 if needed for plotting
         epoch0_train_times_raw_all = []
 
-
-        current_batch_size = random.randint(train_params.BATCH_SIZE_MIN, train_params.BATCH_SIZE_MAX)
-        for batch_start_idx in tqdm(range(0, len(train_data_indices_shuffled), current_batch_size), desc=f"Epoch {epoch} Training"):
-            batch_indices = train_data_indices_shuffled[batch_start_idx : batch_start_idx + current_batch_size]
+        for batch_idx in tqdm(range(num_batches), desc=f"Epoch {epoch} Training"):
+            batch_indices = int_data_indices_shuffled[batch_idx*batch_size_int:(batch_idx+1)*batch_size_int] 
+            batch_indices += ext_data_indices_shuffled[batch_idx*batch_size_ext:(batch_idx+1)*batch_size_ext] 
             if not batch_indices: continue
+            # print(f"Batch {batch_idx + 1}/{num_batches} - Indices: {batch_indices}")
 
             batch_feat_raw = [current_train_features_epoch0[i] for i in batch_indices]
             batch_time_processed = [current_train_time_processed_epoch0.iloc[i] for i in batch_indices]
             batch_event_raw = [current_train_event_epoch0.iloc[i] for i in batch_indices]
             # Also get raw times for this batch if we want to create the train_df with raw times for plotting
             batch_time_raw_for_df = [current_train_time_raw_epoch0.iloc[i] for i in batch_indices]
-
 
             batch_loss, batch_preds, batch_times_ret, batch_events_ret, _ = process_batch(
                 batch_feat_raw, batch_time_processed, batch_event_raw, model, model_conf, criterion_cls,
@@ -809,7 +821,6 @@ def train_and_evaluate_model(
             epoch0_train_times_processed_all.extend(batch_times_ret) # These are percentile ranks
             epoch0_train_events_all.extend(batch_events_ret)
             epoch0_train_times_raw_all.extend(batch_time_raw_for_df) # Store raw times too
-
 
         if num_batches_epoch0 > 0: logger.info(f"Epoch {epoch} Loss: {epoch_loss_sum / num_batches_epoch0:.4f}")
         else: logger.warning(f"Epoch {epoch} no batches."); reinit_attempts += 1; continue
@@ -823,7 +834,6 @@ def train_and_evaluate_model(
             raw_times_for_plotting_optional=current_train_time_raw_epoch0 # Pass raw times for plotting
         )
         train_cindex_e0 = concordance_index(train_times_e0_cidx, pd.Series(epoch0_train_preds_all), train_events_e0_cidx) if epoch0_train_preds_all else 0.0
-
 
         # Evaluate on validation set (E0) - C-index against percentile ranks, plot with raw times
         valid_df_e0_plot, valid_times_e0_cidx, valid_events_e0_cidx = evaluate_model_on_set(
@@ -850,11 +860,8 @@ def train_and_evaluate_model(
 
     if not initial_success: raise RuntimeError(f"Failed C-idx threshold after {train_params.MAX_REINIT_ATTEMPTS} attempts.")
 
+    # ---- EPOCH 1 to N -------------------------------------------------------------------------------------------------------
     best_test_cindex = test_cindex_e0; best_epoch = 0; epochs_no_improve = 0
-    rep_folder_name = f"rep{args.repeat}" if args.repeat is not None else "all_reps"
-    figure_save_dir = paths.FIGURES_DIR / rep_folder_name
-    weights_save_dir = paths.WEIGHTS_DIR / rep_folder_name
-    figure_save_dir.mkdir(parents=True, exist_ok=True); weights_save_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(1, args.Epoch):
         logger.info(f"=== EPOCH {epoch}/{args.Epoch -1} ===")
@@ -862,7 +869,7 @@ def train_and_evaluate_model(
         current_train_features_epoch = list(internal_train_features)
         current_train_clinical_dfs_list_epoch = [internal_train_clinical_df.copy()]
         if args.ExternalDatasets and preloaded_external_data:
-            ext_feat, ext_clinical_df_sampled = sample_external_data(preloaded_external_data, train_params.NUM_EXTERNAL_SAMPLES)
+            ext_feat, ext_clinical_df_sampled = sample_external_data(preloaded_external_data, train_params.NUM_SAMPLES_EXT)
             if not ext_clinical_df_sampled.empty:
                 current_train_features_epoch.extend(ext_feat)
                 current_train_clinical_dfs_list_epoch.append(ext_clinical_df_sampled)
@@ -873,18 +880,22 @@ def train_and_evaluate_model(
         current_train_time_raw_epoch = combined_train_clinical_df_epoch['Time_Raw'] # For plotting
 
         logger.info(f"Epoch {epoch}: Total training samples = {len(current_train_features_epoch)}")
-        train_data_indices_shuffled = list(range(len(current_train_features_epoch)))
-        random.shuffle(train_data_indices_shuffled)
+
+        int_data_indices_shuffled = list(range(train_params.NUM_SAMPLES_INT))
+        random.shuffle(int_data_indices_shuffled)
+        ext_data_indices_shuffled = list(range(train_params.NUM_SAMPLES_INT, num_sample_total))
+        random.shuffle(ext_data_indices_shuffled)
 
         epoch_loss_sum = 0.0; num_batches_current_epoch = 0
         epoch_train_preds_all, epoch_train_times_processed_all, epoch_train_events_all = [], [], []
         epoch_train_times_raw_all_for_plot = []
 
-
-        current_batch_size = random.randint(train_params.BATCH_SIZE_MIN, train_params.BATCH_SIZE_MAX)
-        for batch_start_idx in tqdm(range(0, len(train_data_indices_shuffled), current_batch_size), desc=f"Epoch {epoch} Training"):
-            batch_indices = train_data_indices_shuffled[batch_start_idx : batch_start_idx + current_batch_size]
+        for batch_idx in tqdm(range(num_batches), desc=f"Epoch {epoch} Training"):
+            batch_indices = int_data_indices_shuffled[batch_idx*batch_size_int:(batch_idx+1)*batch_size_int] 
+            batch_indices += ext_data_indices_shuffled[batch_idx*batch_size_ext:(batch_idx+1)*batch_size_ext] 
             if not batch_indices: continue
+            # print(f"Batch {batch_idx + 1}/{num_batches} - Indices: {batch_indices}")
+
             batch_feat_raw = [current_train_features_epoch[i] for i in batch_indices]
             batch_time_processed = [current_train_time_processed_epoch.iloc[i] for i in batch_indices]
             batch_event_raw = [current_train_event_epoch.iloc[i] for i in batch_indices]
@@ -966,7 +977,12 @@ def train_and_evaluate_model(
             f"LogRanks[{log_ranks_str}]_CIdx[{c_indices_str}]_"
             f"Ext{'_'.join(args.ExternalDatasets if args.ExternalDatasets else ['None'])}_{args.repeat}" # Handle empty ExternalDatasets
         )
-        
+
+        rep_folder_name = f"rep{args.repeat}" if args.repeat is not None else "all_reps"
+        figure_save_dir = paths.FIGURES_DIR / rep_folder_name
+        weights_save_dir = paths.WEIGHTS_DIR / rep_folder_name
+        figure_save_dir.mkdir(parents=True, exist_ok=True); weights_save_dir.mkdir(parents=True, exist_ok=True)
+
         weights_file = weights_save_dir / f"{result_filename_stem}.pth"
         figure_file = figure_save_dir / f"{result_filename_stem}.png"
 
@@ -1027,13 +1043,13 @@ def run_experiment_iterations(args: argparse.Namespace, paths: PathsConfig, base
     learning_rates_list = [float(lr.strip()) for lr in args.learning_rate.split(',')]
     
     current_train_params = TrainingParams(N_CLASS=args.n_class_train, # Set N_CLASS from CLI
-                                          BATCH_SIZE_MIN=base_train_params.BATCH_SIZE_MIN,
-                                          # ... (copy other params from base_train_params) ...
-                                          BATCH_SIZE_MAX=base_train_params.BATCH_SIZE_MAX,
+                                          BATCH_SIZE=base_train_params.BATCH_SIZE,
+                                          NUM_SAMPLES_INT=base_train_params.NUM_SAMPLES_INT,
+                                          NUM_SAMPLES_EXT=base_train_params.NUM_SAMPLES_EXT,
                                           CINDEX_MIN_EPOCH0=base_train_params.CINDEX_MIN_EPOCH0,
                                           MAX_REINIT_ATTEMPTS=base_train_params.MAX_REINIT_ATTEMPTS,
                                           EARLY_STOPPING_PATIENCE=base_train_params.EARLY_STOPPING_PATIENCE,
-                                          NUM_EXTERNAL_SAMPLES=base_train_params.NUM_EXTERNAL_SAMPLES,
+
                                           FEATURE_DROPOUT_RATE=base_train_params.FEATURE_DROPOUT_RATE,
                                           FEATURE_DIM=base_train_params.FEATURE_DIM)
 
