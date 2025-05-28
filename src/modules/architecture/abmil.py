@@ -3,11 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class ABMIL(nn.Module):
-    def __init__(self, conf):
+    def __init__(self, conf, num_cancers: int):
         super(ABMIL, self).__init__()
         self.M = conf.D_feat
         self.L = conf.D_inner
-        self.n_class = conf.n_class
         self.ATTENTION_BRANCHES = 1
 
         # Attention branch remains the same
@@ -17,43 +16,26 @@ class ABMIL(nn.Module):
             nn.Linear(self.L, self.ATTENTION_BRANCHES)  # vector w if ATTENTION_BRANCHES==1
         )
         
-        if self.n_class == 1:
-            # Single output: survival risk only
-            self.classifier = nn.Sequential(
-                nn.Linear(self.M, 1)
-            )
-        elif self.n_class == 2:
-            # Dual outputs: survival risk and classification (2 logits)
-            self.survival_head = nn.Linear(self.M, 1)
-            self.classification_head = nn.Sequential(
-                nn.Linear(self.M, 2)
-            )
-        else:
-            raise ValueError("n_class must be either 1 or 2")
+        # three heads
+        self.survival_head       = nn.Linear(self.M, 1)    # “risk”
+        self.event_head          = nn.Linear(self.M, 2)    # “event” (alive/dead)
+        self.cancer_head         = nn.Linear(self.M, num_cancers)  # “cancer” type
+
 
     def forward(self, x, return_att=False):
-        # Expect input x shape: [1, K, M]; squeeze first dimension -> [K, M]
-        H = x.squeeze(0)
-        A = self.attention(H)         # shape: [K, ATTENTION_BRANCHES]
-        A = torch.transpose(A, 1, 0)    # shape: [ATTENTION_BRANCHES, K]
-        A = F.softmax(A, dim=1)         # softmax over K
-        Z = torch.mm(A, H)            # shape: [ATTENTION_BRANCHES, M]
+        H = x.squeeze(0)                         # [K, M]
+        A = self.attention(H).view(1, -1)        # [1, K]
+        A = F.softmax(A, dim=1)                  # [1, K]
+        Z = torch.mm(A, H)                       # [1, M]
 
-        if self.n_class == 1:
-            # Return survival risk only
-            risk = self.classifier(Z)   # shape: [ATTENTION_BRANCHES, 1]
-            if return_att:
-                return risk, A
-            else:
-                return risk
-        elif self.n_class == 2:
-            # Compute survival and classification outputs separately
-            survival_pred = self.survival_head(Z)         # shape: [ATTENTION_BRANCHES, 1]
-            class_pred = self.classification_head(Z)        # shape: [ATTENTION_BRANCHES, 2]
-            if return_att:
-                return (survival_pred, class_pred), A
-            else:
-                return survival_pred, class_pred
+        risk_logits    = self.survival_head(Z)   # [1,1]
+        event_logits   = self.event_head(Z)      # [1,2]
+        cancer_logits  = self.cancer_head(Z)     # [1,num_cancers]
+
+        if return_att:
+            return (risk_logits, event_logits, cancer_logits), A
+        else:
+            return risk_logits, event_logits, cancer_logits
 
     # AUXILIARY METHODS (unchanged)
     def calculate_classification_error(self, X, Y):
